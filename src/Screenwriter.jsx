@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload,
   Clapperboard, ChevronRight, Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText,
-  History, RotateCcw, SeparatorHorizontal, Bold, List, Maximize2
+  History, RotateCcw, SeparatorHorizontal, Bold, List, Maximize2,
+  CheckCircle2, MoreHorizontal, Moon, Sun, Printer, Timer
 } from "lucide-react";
 
 /* ---------------- storage (guarded: falls back to in-memory) ---------------- */
@@ -156,6 +157,7 @@ const DEFAULT_DOC = {
   title: "UNTITLED",
   theme: "",
   treatment: "",
+  titlePage: { byline: "", contact: "" },
   characters: {},
   versions: [],
   scenes: [newScene()],
@@ -188,7 +190,6 @@ function buildFDX(doc) {
     P(map[el.type] || "Action", text);
   };
   doc.scenes.forEach((sc) => {
-    if (sc.act && sc.act.title.trim()) P("Action", sc.act.title.toUpperCase(), true);
     if (sc.heading.trim()) P("Scene Heading", sc.heading.toUpperCase());
     groupElements(sc.elements).forEach((g) => {
       if (g.kind === "single") {
@@ -213,6 +214,10 @@ ${paras.join("\n")}
   <TitlePage>
     <Content>
       <Paragraph Alignment="Center"><Text>${escXML(doc.title.toUpperCase())}</Text></Paragraph>
+      <Paragraph Alignment="Center"><Text></Text></Paragraph>
+      <Paragraph Alignment="Center"><Text>${doc.titlePage && doc.titlePage.byline ? "Written by" : ""}</Text></Paragraph>
+      <Paragraph Alignment="Center"><Text>${escXML((doc.titlePage && doc.titlePage.byline) || "")}</Text></Paragraph>
+      <Paragraph Alignment="Left"><Text>${escXML((doc.titlePage && doc.titlePage.contact) || "")}</Text></Paragraph>
     </Content>
   </TitlePage>
 </FinalDraft>`;
@@ -372,6 +377,11 @@ function downloadFile(name, content, type) {
 
 const CLOUD_KEY = "screenwriter-cloud-v1";
 
+/* Paste your Google client ID between the quotes below and every device (yours and
+   friends') will skip the client ID field entirely. Find it at console.cloud.google.com
+   under Credentials. It ends in .apps.googleusercontent.com */
+const DEFAULT_GOOGLE_CLIENT_ID = "";
+
 const HEADING_RE = /^(INT|EXT|INT\/EXT|I\/E|EST)[.\s]/i;
 const TRANSITION_RE = /^[A-Z0-9 '.]+TO:$/;
 const CHAR_EXTENSIONS = ["(V.O.)", "(O.S.)", "(CONT'D)", "(PRE-LAP)", "(INTO PHONE)"];
@@ -524,6 +534,39 @@ export default function Screenwriter() {
   const [treatmentOpen, setTreatmentOpen] = useState(false);
   const [treatmentWide, setTreatmentWide] = useState(false);
   const treatmentRef = useRef(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [night, setNight] = useState(() => {
+    try { return storage.api.getItem("screenwriter-night") === "1"; } catch { return false; }
+  });
+  const [pomo, setPomo] = useState(null); // { phase: 'work'|'break', remaining, running }
+
+  /* pomodoro tick: 25 min focus, 5 min break, gentle beep at each switch */
+  useEffect(() => {
+    if (!pomo || !pomo.running) return;
+    const t = setInterval(() => {
+      setPomo((p) => {
+        if (!p) return p;
+        if (p.remaining > 1) return { ...p, remaining: p.remaining - 1 };
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const g = ctx.createGain();
+          g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.12, ctx.currentTime);
+          const o = ctx.createOscillator();
+          o.connect(g); o.frequency.value = 880;
+          o.start(); o.stop(ctx.currentTime + 0.18);
+          const o2 = ctx.createOscillator();
+          o2.connect(g); o2.frequency.value = 1175;
+          o2.start(ctx.currentTime + 0.24); o2.stop(ctx.currentTime + 0.44);
+        } catch {}
+        return p.phase === "work"
+          ? { phase: "break", remaining: 5 * 60, running: true }
+          : { phase: "work", remaining: 25 * 60, running: true };
+      });
+    }, 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pomo && pomo.running]);
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [focusTarget, setFocusTarget] = useState(null);
   const [focusedEl, setFocusedEl] = useState(null);
@@ -561,7 +604,7 @@ export default function Screenwriter() {
     // dialogue and parentheticals are deliberately excluded so a break can never land
     // between a character name and their line, or in the middle of a speech.
     const anchorNodes = pageEl.querySelectorAll(
-      ".heading-row, .act-editor, .el-action, .el-character, .el-transition"
+      ".heading-row, .el-action, .el-character, .el-transition"
     );
     const anchors = Array.from(anchorNodes)
       .map((n) => n.getBoundingClientRect().top - pageRect.top)
@@ -647,6 +690,8 @@ export default function Screenwriter() {
 
   const stateRef = useRef();
   stateRef.current = { library, doc, currentId };
+  const cloudRef = useRef(cloud);
+  cloudRef.current = cloud;
 
   const persistCloud = (next) => {
     setCloud(next);
@@ -758,14 +803,18 @@ export default function Screenwriter() {
     }
   };
 
-  const connectDrive = async () => {
-    const clientId = clientIdDraft.trim();
-    if (!clientId) { setCloudError("Add your Google client ID first."); return; }
-    setCloudError("");
+  const silentRef = useRef(false);
+  const refreshTimerRef = useRef(null);
+
+  const connectDrive = async (silent = false) => {
+    const clientId = (DEFAULT_GOOGLE_CLIENT_ID || clientIdDraft || cloud.clientId || "").trim();
+    if (!clientId) { if (!silent) setCloudError("Add your Google client ID first."); return; }
+    if (!silent) setCloudError("");
+    silentRef.current = silent;
     try {
       await loadGoogleScript();
     } catch (err) {
-      setCloudError(err.message);
+      if (!silent) setCloudError(err.message);
       return;
     }
     if (!tokenClientRef.current || tokenClientRef.current.clientId !== clientId) {
@@ -774,11 +823,19 @@ export default function Screenwriter() {
         scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email",
         callback: async (resp) => {
           if (resp.error) {
+            if (silentRef.current) { setCloudStatus("idle"); return; } // quiet fail on background sign-in
             setCloudStatus("error");
             setCloudError(resp.error === "access_denied" ? "Sign-in was cancelled." : resp.error);
             return;
           }
           accessTokenRef.current = resp.access_token;
+          /* refresh the token silently before it expires (Google tokens last ~1 hour) */
+          if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+          refreshTimerRef.current = setTimeout(() => {
+            silentRef.current = true;
+            try { tokenClientRef.current.requestAccessToken({ prompt: "" }); } catch {}
+          }, 50 * 60 * 1000);
+
           setCloudStatus("syncing");
           try {
             const infoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
@@ -787,8 +844,9 @@ export default function Screenwriter() {
             const info = await infoRes.json();
             setSessionEmail(info.email || "signed in");
 
-            const wasConnected = cloud.connected;
-            const { remote, folderId, fileId } = await pullFromCloud(cloud);
+            const cc = cloudRef.current;
+            const wasConnected = cc.connected;
+            const { remote, folderId, fileId } = await pullFromCloud(cc);
             let finalFileId = fileId;
             if (remote && Object.keys(remote.docs).length && !wasConnected) {
               const when = timeAgo(remote.updatedAt);
@@ -796,11 +854,14 @@ export default function Screenwriter() {
                 `Found an existing Drive backup with ${remote.library.length} script(s), last saved ${when}.\n\nOK = load that backup here (replaces what's open now)\nCancel = keep what's on this device and upload it to Drive`
               );
               if (useRemote) applySnapshot(remote);
-              else finalFileId = (await pushToCloud({ ...cloud, folderId, fileId })).fileId;
+              else finalFileId = (await pushToCloud({ ...cc, folderId, fileId })).fileId;
             } else if (remote) {
-              applySnapshot(remote);
+              /* reconnecting: only pull the remote copy if it's actually newer than our last sync,
+                 otherwise push local work up. Never blindly overwrite newer local changes. */
+              if (remote.updatedAt > (cc.lastSyncedAt || 0) + 2000) applySnapshot(remote);
+              else finalFileId = (await pushToCloud({ ...cc, folderId, fileId })).fileId;
             } else {
-              finalFileId = (await pushToCloud({ ...cloud, folderId, fileId })).fileId;
+              finalFileId = (await pushToCloud({ ...cc, folderId, fileId })).fileId;
             }
             persistCloud({
               clientId, connected: true, lastSyncedAt: Date.now(),
@@ -809,15 +870,25 @@ export default function Screenwriter() {
             setCloudStatus("ok");
           } catch (err) {
             setCloudStatus("error");
-            setCloudError(err.message || "Couldn't reach Google Drive.");
+            if (!silentRef.current) setCloudError(err.message || "Couldn't reach Google Drive.");
           }
         },
       });
       client.clientId = clientId;
       tokenClientRef.current = client;
     }
-    tokenClientRef.current.requestAccessToken({ prompt: sessionEmail ? "" : "consent" });
+    tokenClientRef.current.requestAccessToken({ prompt: silent || sessionEmail ? "" : "consent" });
   };
+
+  /* auto sign-in on load: if this device was connected before, quietly resume the session */
+  useEffect(() => {
+    if (!cloud.connected) return;
+    const cid = (DEFAULT_GOOGLE_CLIENT_ID || cloud.clientId || "").trim();
+    if (!cid) return;
+    const t = setTimeout(() => connectDrive(true), 900);
+    return () => { clearTimeout(t); if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const syncNow = async () => {
     if (!cloud.connected) return;
@@ -1327,7 +1398,7 @@ export default function Screenwriter() {
 
   /* ---------------- render ---------------- */
   return (
-    <div className="sw-root">
+    <div className={`sw-root${night ? " night" : ""}`}>
       <style>{CSS}</style>
 
       {/* top bar */}
@@ -1388,20 +1459,80 @@ export default function Screenwriter() {
             <Circle size={7} fill="currentColor" />
             {saveState === "saved" ? "Saved" : "Saving"}
           </span>
-          <button className="icon-btn" title="Backup (.json)" onClick={exportJSON}>
-            <FileJson size={15} />
-          </button>
-          <button className="icon-btn" title="Import script (.fdx, .txt) or restore backup (.json)" onClick={() => fileRef.current && fileRef.current.click()}>
-            <Upload size={15} />
-          </button>
+          {cloud.connected && (!sessionEmail || cloudStatus === "error") && (
+            <span className="sync-warn" title="Cloud sync isn't active. Click the cloud icon to reconnect.">not synced</span>
+          )}
+          {pomo && (
+            <span
+              className={`pomo-chip ${pomo.phase}${pomo.running ? "" : " paused"}`}
+              title={pomo.running ? "Click to pause" : "Click to resume"}
+              onClick={() => setPomo((p) => ({ ...p, running: !p.running }))}
+            >
+              <Timer size={11} />
+              {`${Math.floor(pomo.remaining / 60)}:${String(pomo.remaining % 60).padStart(2, "0")}`}
+              <X size={11} className="pomo-x" onClick={(e) => { e.stopPropagation(); setPomo(null); }} />
+            </span>
+          )}
           <input ref={fileRef} type="file" accept=".json,.fdx,.txt,.fountain" style={{ display: "none" }} onChange={importFile} />
           <button className="export-btn" onClick={exportFDX}>
             <Download size={14} /> FDX
           </button>
           <div className="cloud-wrap">
             <button
-              className={`icon-btn${cloudOpen ? " on" : ""}`}
-              title="Cloud sync"
+              className={`icon-btn${menuOpen ? " on" : ""}`}
+              title="More"
+              onClick={() => setMenuOpen((v) => !v)}
+            >
+              <MoreHorizontal size={16} />
+            </button>
+            {menuOpen && (
+              <div className="cloud-panel">
+                <button className="menu-item" onClick={() => { setMenuOpen(false); fileRef.current && fileRef.current.click(); }}>
+                  <Upload size={14} /> Import script or restore backup
+                </button>
+                <button className="menu-item" onClick={() => { setMenuOpen(false); exportJSON(); }}>
+                  <FileJson size={14} /> Download backup (.json)
+                </button>
+                <button className="menu-item" onClick={() => { setMenuOpen(false); setTimeout(() => window.print(), 150); }}>
+                  <Printer size={14} /> Print / save as PDF
+                </button>
+                <button className="menu-item" onClick={() => {
+                  setNight((v) => {
+                    try { storage.api.setItem("screenwriter-night", v ? "0" : "1"); } catch {}
+                    return !v;
+                  });
+                }}>
+                  {night ? <Sun size={14} /> : <Moon size={14} />} {night ? "Light mode" : "Night mode"}
+                </button>
+                {!pomo && (
+                  <button className="menu-item" onClick={() => { setPomo({ phase: "work", remaining: 25 * 60, running: true }); setMenuOpen(false); }}>
+                    <Timer size={14} /> Focus timer (25 min)
+                  </button>
+                )}
+                <div className="cloud-label" style={{ marginTop: 12 }}>Title page</div>
+                <input
+                  className="cloud-input"
+                  placeholder="Written by (your name)"
+                  value={(doc.titlePage && doc.titlePage.byline) || ""}
+                  onChange={(e) => setDoc((d) => ({ ...d, titlePage: { ...(d.titlePage || {}), byline: e.target.value } }))}
+                  spellCheck={false}
+                />
+                <input
+                  className="cloud-input"
+                  style={{ marginTop: 6 }}
+                  placeholder="Contact (email, phone)"
+                  value={(doc.titlePage && doc.titlePage.contact) || ""}
+                  onChange={(e) => setDoc((d) => ({ ...d, titlePage: { ...(d.titlePage || {}), contact: e.target.value } }))}
+                  spellCheck={false}
+                />
+                <div className="cloud-hint">Shows on the printed PDF and in the FDX export.</div>
+              </div>
+            )}
+          </div>
+          <div className="cloud-wrap">
+            <button
+              className={`icon-btn${cloudOpen ? " on" : ""}${cloud.connected && (!sessionEmail || cloudStatus === "error") ? " warn-badge" : ""}`}
+              title={cloud.connected && !sessionEmail ? "Not synced. Click to reconnect." : "Cloud sync"}
               onClick={() => { setClientIdDraft(cloud.clientId); setCloudOpen((v) => !v); }}
             >
               {cloud.connected && sessionEmail ? <Cloud size={16} /> : <CloudOff size={16} />}
@@ -1411,19 +1542,23 @@ export default function Screenwriter() {
                 {!cloud.connected && (
                   <>
                     <div className="cloud-title">Connect Google Drive</div>
-                    <label className="cloud-label">Google client ID</label>
-                    <input
-                      className="cloud-input"
-                      placeholder="xxxx.apps.googleusercontent.com"
-                      value={clientIdDraft}
-                      onChange={(e) => setClientIdDraft(e.target.value)}
-                      spellCheck={false}
-                    />
+                    {!DEFAULT_GOOGLE_CLIENT_ID && (
+                      <>
+                        <label className="cloud-label">Google client ID</label>
+                        <input
+                          className="cloud-input"
+                          placeholder="xxxx.apps.googleusercontent.com"
+                          value={clientIdDraft}
+                          onChange={(e) => setClientIdDraft(e.target.value)}
+                          spellCheck={false}
+                        />
+                      </>
+                    )}
                     {cloudError && <div className="cloud-error">{cloudError}</div>}
                     <button
                       className="cloud-btn"
-                      onClick={connectDrive}
-                      disabled={cloudStatus === "syncing" || !clientIdDraft.trim()}
+                      onClick={() => connectDrive(false)}
+                      disabled={cloudStatus === "syncing" || (!DEFAULT_GOOGLE_CLIENT_ID && !clientIdDraft.trim())}
                     >
                       {cloudStatus === "syncing" ? "Connecting..." : "Connect Google Drive"}
                     </button>
@@ -1459,7 +1594,7 @@ export default function Screenwriter() {
                     {cloudError && <div className="cloud-error">{cloudError}</div>}
                     <button
                       className="cloud-btn"
-                      onClick={() => { setClientIdDraft(cloud.clientId); connectDrive(); }}
+                      onClick={() => { setClientIdDraft(cloud.clientId); connectDrive(false); }}
                       disabled={cloudStatus === "syncing"}
                     >
                       {cloudStatus === "syncing" ? "Connecting..." : "Reconnect Google Drive"}
@@ -1596,7 +1731,12 @@ export default function Screenwriter() {
                 </>
               ) : (
                 <>
-                  <span>Scenes</span>
+                  <span>
+                    Scenes
+                    {doc.scenes.some((s) => s.done) && (
+                      <span className="scene-progress"> {doc.scenes.filter((s) => s.done).length}/{doc.scenes.length}</span>
+                    )}
+                  </span>
                   <button className="mini-btn" onClick={() => addScene()}>
                     <Plus size={13} /> Scene
                   </button>
@@ -1627,6 +1767,13 @@ export default function Screenwriter() {
                     onClick={(e) => handleCardClick(e, i, sc)}
                   >
                     <div className="card-top">
+                      <button
+                        className={`scene-check${sc.done ? " done" : ""}`}
+                        title={sc.done ? "Mark not done" : "Mark done"}
+                        onClick={(e) => { e.stopPropagation(); updateScene(sc.id, (s) => ({ ...s, done: !s.done })); }}
+                      >
+                        {sc.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
+                      </button>
                       <span className="card-num">{i + 1}</span>
                       <span className="card-heading">{sc.heading.trim() || "Untitled scene"}</span>
                       <span className="card-actions" onClick={(e) => e.stopPropagation()}>
@@ -1662,6 +1809,20 @@ export default function Screenwriter() {
         {/* editor */}
         <main className="editor-scroll">
           <div className="page" ref={pageRef}>
+            <div className="print-title-page" aria-hidden="true">
+              <div className="ptp-center">
+                <div className="ptp-title">{doc.title.toUpperCase()}</div>
+                {doc.titlePage && doc.titlePage.byline && (
+                  <>
+                    <div className="ptp-by">Written by</div>
+                    <div className="ptp-byline">{doc.titlePage.byline}</div>
+                  </>
+                )}
+              </div>
+              {doc.titlePage && doc.titlePage.contact && (
+                <div className="ptp-contact">{doc.titlePage.contact}</div>
+              )}
+            </div>
             <span ref={lineProbeRef} className="line-probe" aria-hidden="true">Wg</span>
             {showBreaks && pageBreaks.map((b) => (
               <div key={b.page} className="page-break" style={{ top: b.y }}>
@@ -1674,14 +1835,6 @@ export default function Screenwriter() {
                 className="scene"
                 ref={(n) => { sceneRefs.current[sc.id] = n; }}
               >
-                {sc.act && (
-                  <input
-                    className="act-editor"
-                    value={sc.act.title}
-                    onChange={(e) => setActTitle(sc.id, e.target.value)}
-                    spellCheck={false}
-                  />
-                )}
                 <div className="heading-row">
                   <span className="scene-num">{i + 1}</span>
                   <input
@@ -1692,6 +1845,17 @@ export default function Screenwriter() {
                     onKeyDown={(e) => headingKeyDown(e, sc)}
                     spellCheck={false}
                   />
+                  <span className="scene-tools">
+                    <button
+                      className="ghost danger"
+                      title="Delete this scene"
+                      onClick={() => {
+                        if (window.confirm(`Delete scene ${i + 1}${sc.heading.trim() ? ` (${sc.heading.trim()})` : ""}?`)) deleteScene(sc.id);
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </span>
                 </div>
                 {groupElements(sc.elements).map((g) =>
                   g.kind === "single" ? (
@@ -2334,6 +2498,111 @@ const CSS = `
 .ver-name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ver-date { font-size: 10px; color: var(--faint); }
 
+/* ---- scene done checkbox + progress ---- */
+.scene-check {
+  display: flex; align-items: center;
+  background: transparent; border: none; padding: 0;
+  color: var(--faint); flex: 0 0 auto;
+}
+.scene-check:hover { color: var(--dim); }
+.scene-check.done { color: #3E7A52; }
+.card .card-heading { transition: color .15s; }
+.card:has(.scene-check.done) .card-heading { color: var(--faint); }
+.scene-progress { color: var(--accent); margin-left: 4px; }
+
+/* ---- scene tools in the editor ---- */
+.scene-tools { display: none; align-items: center; margin-left: 8px; flex: 0 0 auto; }
+.heading-row:hover .scene-tools { display: flex; }
+
+/* ---- sync warning ---- */
+.sync-warn {
+  font-family: 'Jost', sans-serif; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: #B4453B;
+}
+.icon-btn.warn-badge { position: relative; }
+.icon-btn.warn-badge::after {
+  content: ""; position: absolute; top: 4px; right: 4px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #B4453B;
+}
+
+/* ---- pomodoro chip ---- */
+.pomo-chip {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 9px; border-radius: 999px;
+  font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  cursor: pointer; user-select: none;
+}
+.pomo-chip.work { background: rgba(44,74,115,.1); color: var(--accent); border: 1px solid rgba(44,74,115,.3); }
+.pomo-chip.break { background: rgba(62,122,82,.1); color: #3E7A52; border: 1px solid rgba(62,122,82,.3); }
+.pomo-chip.paused { opacity: 0.55; }
+.pomo-x { opacity: 0.6; }
+.pomo-x:hover { opacity: 1; }
+
+/* ---- overflow menu ---- */
+.menu-item {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; padding: 8px 9px;
+  background: transparent; border: none; border-radius: 6px;
+  font-size: 12px; color: var(--text); text-align: left;
+}
+.menu-item:hover { background: var(--panel2); }
+
+/* ---- night mode ---- */
+.sw-root.night {
+  --bg: #141519;
+  --panel: #1B1D23;
+  --panel2: #22252C;
+  --line: #2B2E36;
+  --text: #E8E8E3;
+  --dim: #8B8F99;
+  --faint: #5A5E68;
+  --accent: #7FA3D4;
+  --accent2: #C9A25E;
+  --paper: #1D1E22;
+  --ink: #DDDDD6;
+  --ink-dim: #5F605C;
+}
+.sw-root.night .page { box-shadow: 0 1px 2px rgba(0,0,0,.5), 0 12px 32px rgba(0,0,0,.4); }
+.sw-root.night .el-row textarea::placeholder { color: #4A4B50; }
+.sw-root.night .el-parenthetical textarea { color: #96968E; }
+.sw-root.night .el-type-label { color: #55565C; }
+.sw-root.night .page-break { border-top-color: #35363C; }
+.sw-root.night .page-break-num { color: #6E6F75; }
+.sw-root.night .gap-btn { color: #55565C; }
+.sw-root.night .gap-btn:hover { color: #8B8F99; }
+.sw-root.night .export-btn { color: #10131A; }
+.sw-root.night .cloud-btn { color: #10131A; }
+.sw-root.night .theme-strip.filled { box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+
+/* ---- print / save as PDF ---- */
+.print-title-page { display: none; }
+@media print {
+  .topbar, .board, .projects, .chars, .treatment, .hint-bar, .page-break,
+  .scene-gap, .dual-pair-btn, .dual-unpair-btn, .scene-tools, .el-type-label, .ac-menu { display: none !important; }
+  .sw-root { position: static; overflow: visible; background: #fff; }
+  .body { display: block; }
+  .editor-scroll { overflow: visible; }
+  .page {
+    box-shadow: none; border-radius: 0;
+    width: 100%; margin: 0; padding: 0; min-height: 0;
+    background: #fff; color: #000;
+  }
+  .print-title-page {
+    display: flex !important; flex-direction: column;
+    height: 9in; page-break-after: always;
+    font-family: 'Courier Prime', monospace; color: #000;
+  }
+  .ptp-center { margin: auto; text-align: center; }
+  .ptp-title { font-size: 15px; font-weight: 700; letter-spacing: 0.05em; }
+  .ptp-by { margin-top: 28px; font-size: 14px; }
+  .ptp-byline { margin-top: 10px; font-size: 14px; }
+  .ptp-contact { font-size: 12px; white-space: pre-line; }
+  .heading-input, .el-row textarea { color: #000; }
+  @page { margin: 1in 1in 1in 1.5in; size: letter; }
+}
+
 /* ---- characters panel ---- */
 .chars {
   width: 300px; flex: 0 0 300px;
@@ -2377,15 +2646,30 @@ const CSS = `
 
 /* ---- responsive ---- */
 @media (max-width: 900px) {
-  .topbar { grid-template-columns: auto minmax(120px, 1fr) auto; }
-  .title-input { width: 100px; }
-  .page-est { display: none; }
   .page { padding: 40px 28px 80px 40px; width: calc(100% - 24px); }
   .scene-num, .el-type-label { display: none !important; }
   .el-character textarea { margin-left: 26%; width: 70%; }
   .el-dialogue textarea { margin-left: 13%; width: 68%; }
   .el-parenthetical textarea { margin-left: 20%; width: 50%; }
-  .board, .projects { position: absolute; z-index: 4; top: 52px; bottom: 0; box-shadow: 12px 0 24px rgba(20,20,15,.10); }
-  .chars, .treatment { position: absolute; right: 0; z-index: 4; top: 52px; bottom: 0; box-shadow: -12px 0 24px rgba(20,20,15,.10); }
+  .board, .projects { position: absolute; left: 0; z-index: 4; top: var(--topbar-h, 52px); bottom: 0; box-shadow: 12px 0 24px rgba(20,20,15,.10); }
+  .chars, .treatment { position: absolute; right: 0; z-index: 4; top: var(--topbar-h, 52px); bottom: 0; box-shadow: -12px 0 24px rgba(20,20,15,.10); }
+  .treatment.wide { width: 100%; flex-basis: 100%; }
+}
+
+@media (max-width: 700px) {
+  .sw-root { --topbar-h: 92px; }
+  .topbar {
+    display: flex; flex-wrap: wrap;
+    height: auto; min-height: 92px;
+    padding: 6px 10px; row-gap: 4px; column-gap: 8px;
+  }
+  .tb-left { flex: 1; min-width: 0; }
+  .tb-right { flex: 0 0 auto; margin-left: auto; }
+  .theme-strip { order: 3; width: 100%; }
+  .title-input { width: 90px; font-size: 11px; }
+  .icon-btn { width: 28px; height: 28px; }
+  .export-btn { padding: 5px 9px; font-size: 11px; }
+  .page-est, .sync-warn { display: none; }
+  .cloud-panel { position: fixed; left: 10px; right: 10px; top: var(--topbar-h, 92px); width: auto; }
 }
 `;
