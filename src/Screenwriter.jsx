@@ -230,18 +230,6 @@ function downloadFile(name, content, type) {
 
 const CLOUD_KEY = "screenwriter-cloud-v1";
 
-function decodeJwtPayload(token) {
-  try {
-    const b64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    const json = decodeURIComponent(
-      atob(b64).split("").map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join("")
-    );
-    return JSON.parse(json);
-  } catch {
-    return {};
-  }
-}
-
 let gsiLoadPromise = null;
 function loadGoogleScript() {
   if (window.google && window.google.accounts && window.google.accounts.id) return Promise.resolve();
@@ -415,27 +403,32 @@ export default function Screenwriter() {
     touchLibrary(id, d.title);
   }, [touchLibrary]);
 
-  /* ---- cloud sync (Google sign-in) ---- */
+  /* ---- cloud sync (Google Drive, drive.file scope) ---- */
   const [cloud, setCloud] = useState(() => {
     try {
       const raw = storage.api.getItem(CLOUD_KEY);
       const c = raw ? JSON.parse(raw) : null;
       return c && typeof c === "object"
-        ? { url: c.url || "", clientId: c.clientId || "", connected: !!c.connected, lastSyncedAt: c.lastSyncedAt || null, email: c.email || "" }
-        : { url: "", clientId: "", connected: false, lastSyncedAt: null, email: "" };
+        ? {
+            clientId: c.clientId || "",
+            connected: !!c.connected,
+            lastSyncedAt: c.lastSyncedAt || null,
+            email: c.email || "",
+            folderId: c.folderId || null,
+            fileId: c.fileId || null,
+          }
+        : { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, fileId: null };
     } catch {
-      return { url: "", clientId: "", connected: false, lastSyncedAt: null, email: "" };
+      return { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, fileId: null };
     }
   });
   const [cloudOpen, setCloudOpen] = useState(false);
   const [cloudStatus, setCloudStatus] = useState("idle"); // idle | syncing | ok | error
   const [cloudError, setCloudError] = useState("");
-  const [urlDraft, setUrlDraft] = useState(cloud.url);
   const [clientIdDraft, setClientIdDraft] = useState(cloud.clientId);
-  const [gsiReady, setGsiReady] = useState(false);
   const [sessionEmail, setSessionEmail] = useState(""); // set once signed in THIS session
-  const idTokenRef = useRef(null);
-  const gsiButtonRef = useRef(null);
+  const accessTokenRef = useRef(null);
+  const tokenClientRef = useRef(null);
 
   const stateRef = useRef();
   stateRef.current = { library, doc, currentId };
@@ -456,29 +449,86 @@ export default function Screenwriter() {
     return { library: lib, docs, updatedAt: Date.now() };
   };
 
-  const authedFetch = async (cfg, opts = {}) => {
-    if (!idTokenRef.current) throw new Error("Signed out. Sign in again to sync.");
-    const res = await fetch(`${cfg.url.replace(/\/$/, "")}/sync`, {
+  const driveFetch = async (opts = {}, url) => {
+    if (!accessTokenRef.current) throw new Error("Signed out. Reconnect to sync.");
+    const res = await fetch(url, {
       ...opts,
-      headers: { ...(opts.headers || {}), Authorization: `Bearer ${idTokenRef.current}` },
+      headers: { ...(opts.headers || {}), Authorization: `Bearer ${accessTokenRef.current}` },
     });
-    if (res.status === 401) throw new Error("Signed out. Sign in again to sync.");
-    if (!res.ok) throw new Error(`Server said ${res.status}`);
+    if (res.status === 401) throw new Error("Signed out. Reconnect to sync.");
+    if (!res.ok) throw new Error(`Drive said ${res.status}`);
     return res;
   };
 
+  const ensureFolder = async () => {
+    const q = encodeURIComponent("name='Screenwriter' and mimeType='application/vnd.google-apps.folder' and trashed=false");
+    const found = await driveFetch({}, `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)`);
+    const data = await found.json();
+    if (data.files && data.files.length) return data.files[0].id;
+    const created = await driveFetch(
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Screenwriter", mimeType: "application/vnd.google-apps.folder" }),
+      },
+      "https://www.googleapis.com/drive/v3/files"
+    );
+    return (await created.json()).id;
+  };
+
+  const findFile = async (folderId) => {
+    const q = encodeURIComponent(`name='screenwriter-sync.json' and '${folderId}' in parents and trashed=false`);
+    const res = await driveFetch({}, `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)`);
+    const data = await res.json();
+    return (data.files && data.files[0] && data.files[0].id) || null;
+  };
+
+  const createFile = async (folderId, content) => {
+    const boundary = "swjsboundary";
+    const metadata = { name: "screenwriter-sync.json", parents: [folderId], mimeType: "application/json" };
+    const body =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${content}\r\n--${boundary}--`;
+    const res = await driveFetch(
+      { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body },
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id"
+    );
+    return (await res.json()).id;
+  };
+
+  const updateFile = (fileId, content) =>
+    driveFetch(
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: content },
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`
+    );
+
+  const downloadFile = async (fileId) => {
+    const res = await driveFetch({}, `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+    try { return JSON.parse(await res.text()); } catch { return null; }
+  };
+
   const pushToCloud = async (cfg) => {
-    await authedFetch(cfg, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildSnapshot()),
-    });
+    const folderId = cfg.folderId || (await ensureFolder());
+    const content = JSON.stringify(buildSnapshot());
+    let fileId = cfg.fileId;
+    if (fileId) {
+      try {
+        await updateFile(fileId, content);
+      } catch {
+        fileId = await createFile(folderId, content);
+      }
+    } else {
+      fileId = await createFile(folderId, content);
+    }
+    return { folderId, fileId };
   };
 
   const pullFromCloud = async (cfg) => {
-    const res = await authedFetch(cfg, { method: "GET" });
-    const data = await res.json();
-    return data && Array.isArray(data.library) ? data : null;
+    const folderId = cfg.folderId || (await ensureFolder());
+    const fileId = cfg.fileId || (await findFile(folderId));
+    if (!fileId) return { remote: null, folderId, fileId: null };
+    const data = await downloadFile(fileId);
+    return { remote: data && Array.isArray(data.library) ? data : null, folderId, fileId };
   };
 
   const applySnapshot = (snap) => {
@@ -493,93 +543,104 @@ export default function Screenwriter() {
     }
   };
 
-  /* load Google's sign-in script once a client id is present, then render the button */
-  useEffect(() => {
-    const clientId = (cloud.connected ? cloud.clientId : clientIdDraft).trim();
-    if (!clientId || sessionEmail) return;
-    let cancelled = false;
-    loadGoogleScript()
-      .then(() => {
-        if (cancelled) return;
-        setGsiReady(true);
-        window.google.accounts.id.initialize({
-          client_id: clientId,
-          callback: async (response) => {
-            const token = response.credential;
-            const payload = decodeJwtPayload(token);
-            idTokenRef.current = token;
-            setSessionEmail(payload.email || "signed in");
+  const connectDrive = async () => {
+    const clientId = clientIdDraft.trim();
+    if (!clientId) { setCloudError("Add your Google client ID first."); return; }
+    setCloudError("");
+    try {
+      await loadGoogleScript();
+    } catch (err) {
+      setCloudError(err.message);
+      return;
+    }
+    if (!tokenClientRef.current || tokenClientRef.current.clientId !== clientId) {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email",
+        callback: async (resp) => {
+          if (resp.error) {
+            setCloudStatus("error");
+            setCloudError(resp.error === "access_denied" ? "Sign-in was cancelled." : resp.error);
+            return;
+          }
+          accessTokenRef.current = resp.access_token;
+          setCloudStatus("syncing");
+          try {
+            const infoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+              headers: { Authorization: `Bearer ${resp.access_token}` },
+            });
+            const info = await infoRes.json();
+            setSessionEmail(info.email || "signed in");
 
-            const url = (cloud.connected ? cloud.url : urlDraft).trim();
-            if (!url) { setCloudError("Add the worker address too."); return; }
-            setCloudStatus("syncing");
-            setCloudError("");
-            const cfg = { url, clientId, connected: true, lastSyncedAt: Date.now(), email: payload.email || "" };
-            try {
-              const remote = await pullFromCloud(cfg);
-              if (remote && Object.keys(remote.docs).length && !cloud.connected) {
-                const when = timeAgo(remote.updatedAt);
-                const useRemote = window.confirm(
-                  `Found an existing cloud backup with ${remote.library.length} script(s), last saved ${when}.\n\nOK = load that backup here (replaces what's open now)\nCancel = keep what's on this device and upload it to the cloud`
-                );
-                if (useRemote) applySnapshot(remote);
-                else await pushToCloud(cfg);
-              } else if (remote) {
-                applySnapshot(remote);
-              } else {
-                await pushToCloud(cfg);
-              }
-              persistCloud(cfg);
-              setCloudStatus("ok");
-            } catch (err) {
-              setCloudStatus("error");
-              setCloudError(err.message || "Couldn't reach that address.");
+            const wasConnected = cloud.connected;
+            const { remote, folderId, fileId } = await pullFromCloud(cloud);
+            let finalFileId = fileId;
+            if (remote && Object.keys(remote.docs).length && !wasConnected) {
+              const when = timeAgo(remote.updatedAt);
+              const useRemote = window.confirm(
+                `Found an existing Drive backup with ${remote.library.length} script(s), last saved ${when}.\n\nOK = load that backup here (replaces what's open now)\nCancel = keep what's on this device and upload it to Drive`
+              );
+              if (useRemote) applySnapshot(remote);
+              else finalFileId = (await pushToCloud({ ...cloud, folderId, fileId })).fileId;
+            } else if (remote) {
+              applySnapshot(remote);
+            } else {
+              finalFileId = (await pushToCloud({ ...cloud, folderId, fileId })).fileId;
             }
-          },
-        });
-        if (gsiButtonRef.current) {
-          window.google.accounts.id.renderButton(gsiButtonRef.current, { theme: "outline", size: "large", width: 248 });
-        }
-      })
-      .catch((err) => setCloudError(err.message));
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloudOpen, clientIdDraft, cloud.clientId, cloud.connected, sessionEmail]);
+            persistCloud({
+              clientId, connected: true, lastSyncedAt: Date.now(),
+              email: info.email || "", folderId, fileId: finalFileId,
+            });
+            setCloudStatus("ok");
+          } catch (err) {
+            setCloudStatus("error");
+            setCloudError(err.message || "Couldn't reach Google Drive.");
+          }
+        },
+      });
+      client.clientId = clientId;
+      tokenClientRef.current = client;
+    }
+    tokenClientRef.current.requestAccessToken({ prompt: sessionEmail ? "" : "consent" });
+  };
 
   const syncNow = async () => {
     if (!cloud.connected) return;
     setCloudStatus("syncing");
     try {
-      await pushToCloud(cloud);
-      const next = { ...cloud, lastSyncedAt: Date.now() };
-      persistCloud(next);
+      const { folderId, fileId } = await pushToCloud(cloud);
+      persistCloud({ ...cloud, folderId, fileId, lastSyncedAt: Date.now() });
       setCloudStatus("ok");
     } catch (err) {
       setCloudStatus("error");
-      setCloudError(err.message || "Couldn't reach that address.");
+      setCloudError(err.message || "Couldn't reach Google Drive.");
     }
   };
 
   const disconnectCloud = () => {
+    try {
+      if (accessTokenRef.current && window.google) {
+        window.google.accounts.oauth2.revoke(accessTokenRef.current);
+      }
+    } catch {}
     persistCloud({ ...cloud, connected: false });
-    idTokenRef.current = null;
+    accessTokenRef.current = null;
     setSessionEmail("");
     setCloudStatus("idle");
-    try { window.google && window.google.accounts.id.disableAutoSelect(); } catch {}
   };
 
   /* background push every 60s while connected and signed in this session */
   useEffect(() => {
     if (!cloud.connected) return;
     const t = setInterval(() => {
-      if (!idTokenRef.current) return;
+      if (!accessTokenRef.current) return;
       pushToCloud(cloud)
-        .then(() => persistCloud({ ...cloud, lastSyncedAt: Date.now() }))
+        .then(({ folderId, fileId }) => persistCloud({ ...cloud, folderId, fileId, lastSyncedAt: Date.now() }))
         .catch(() => setCloudStatus("error"));
     }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloud.connected, cloud.url, cloud.clientId]);
+  }, [cloud.connected, cloud.clientId]);
 
   /* ---- autosave ---- */
   useEffect(() => {
@@ -964,7 +1025,7 @@ export default function Screenwriter() {
             <button
               className={`icon-btn${cloudOpen ? " on" : ""}`}
               title="Cloud sync"
-              onClick={() => { setUrlDraft(cloud.url); setClientIdDraft(cloud.clientId); setCloudOpen((v) => !v); }}
+              onClick={() => { setClientIdDraft(cloud.clientId); setCloudOpen((v) => !v); }}
             >
               {cloud.connected && sessionEmail ? <Cloud size={16} /> : <CloudOff size={16} />}
             </button>
@@ -972,15 +1033,7 @@ export default function Screenwriter() {
               <div className="cloud-panel">
                 {!cloud.connected && (
                   <>
-                    <div className="cloud-title">Connect cloud sync</div>
-                    <label className="cloud-label">Worker address</label>
-                    <input
-                      className="cloud-input"
-                      placeholder="https://screenwriter-sync.yourname.workers.dev"
-                      value={urlDraft}
-                      onChange={(e) => setUrlDraft(e.target.value)}
-                      spellCheck={false}
-                    />
+                    <div className="cloud-title">Connect Google Drive</div>
                     <label className="cloud-label">Google client ID</label>
                     <input
                       className="cloud-input"
@@ -990,12 +1043,15 @@ export default function Screenwriter() {
                       spellCheck={false}
                     />
                     {cloudError && <div className="cloud-error">{cloudError}</div>}
-                    <div className="cloud-google-btn">
-                      {clientIdDraft.trim() && urlDraft.trim() ? (
-                        <div ref={gsiButtonRef} />
-                      ) : (
-                        <div className="cloud-hint">Fill in both fields above to sign in.</div>
-                      )}
+                    <button
+                      className="cloud-btn"
+                      onClick={connectDrive}
+                      disabled={cloudStatus === "syncing" || !clientIdDraft.trim()}
+                    >
+                      {cloudStatus === "syncing" ? "Connecting..." : "Connect Google Drive"}
+                    </button>
+                    <div className="cloud-hint">
+                      Saves a file to your own Drive, in a "Screenwriter" folder. Nobody else can see it.
                     </div>
                   </>
                 )}
@@ -1006,7 +1062,7 @@ export default function Screenwriter() {
                     <div className="cloud-status">
                       {cloudStatus === "syncing" && "Syncing..."}
                       {cloudStatus === "ok" && cloud.lastSyncedAt && `Last synced ${timeAgo(cloud.lastSyncedAt)}`}
-                      {cloudStatus === "error" && (cloudError || "Couldn't reach the server")}
+                      {cloudStatus === "error" && (cloudError || "Couldn't reach Google Drive")}
                       {cloudStatus === "idle" && cloud.lastSyncedAt && `Last synced ${timeAgo(cloud.lastSyncedAt)}`}
                     </div>
                     <div className="cloud-row">
@@ -1024,7 +1080,13 @@ export default function Screenwriter() {
                     <div className="cloud-title">Sign in to resume sync</div>
                     <div className="cloud-meta">{cloud.email}</div>
                     {cloudError && <div className="cloud-error">{cloudError}</div>}
-                    <div className="cloud-google-btn"><div ref={gsiButtonRef} /></div>
+                    <button
+                      className="cloud-btn"
+                      onClick={() => { setClientIdDraft(cloud.clientId); connectDrive(); }}
+                      disabled={cloudStatus === "syncing"}
+                    >
+                      {cloudStatus === "syncing" ? "Connecting..." : "Reconnect Google Drive"}
+                    </button>
                     <button className="cloud-btn secondary danger" onClick={disconnectCloud} style={{ marginTop: 10 }}>
                       Disconnect
                     </button>
