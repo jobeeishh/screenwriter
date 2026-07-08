@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { Fragment, useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload,
   Clapperboard, ChevronRight, Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText,
   History, RotateCcw, SeparatorHorizontal, Bold, List, Maximize2,
-  CheckCircle2, MoreHorizontal, Moon, Sun, Printer, Timer
+  CheckCircle2, MoreHorizontal, Moon, Sun, Printer, Timer, Flame
 } from "lucide-react";
 
 /* ---------------- storage (guarded: falls back to in-memory) ---------------- */
@@ -160,8 +160,29 @@ const DEFAULT_DOC = {
   titlePage: { byline: "", contact: "" },
   characters: {},
   versions: [],
+  acts: [],
   scenes: [newScene()],
 };
+
+/* Migrate older docs: acts used to live on scenes; now they're independent markers
+   positioned by index so cards can move freely underneath them. */
+function normalizeDoc(d) {
+  if (!d) return d;
+  const doc = { ...d };
+  if (!Array.isArray(doc.acts)) doc.acts = [];
+  let migrated = false;
+  doc.scenes = (doc.scenes || []).map((s, i) => {
+    if (s.act) {
+      doc.acts = [...doc.acts, { id: s.act.id || uid(), title: s.act.title || "ACT ", index: i }];
+      migrated = true;
+      const { act, ...rest } = s;
+      return rest;
+    }
+    return s;
+  });
+  if (!doc.titlePage) doc.titlePage = { byline: "", contact: "" };
+  return migrated || !d.acts || !d.titlePage ? doc : d;
+}
 
 function escXML(s) {
   return String(s)
@@ -173,6 +194,23 @@ function escXML(s) {
 
 function buildFDX(doc) {
   const paras = [];
+  const tpParas = [];
+  const TP = (text, center = true) =>
+    tpParas.push(`      <Paragraph${center ? ' Alignment="Center"' : ' Alignment="Left"'}><Text>${escXML(text)}</Text></Paragraph>`);
+  const byline = (doc.titlePage && doc.titlePage.byline) || "";
+  const contact = (doc.titlePage && doc.titlePage.contact) || "";
+  for (let i = 0; i < 16; i++) TP("");
+  TP(doc.title.toUpperCase());
+  if (byline) {
+    TP(""); TP("");
+    TP("Written by");
+    TP("");
+    TP(byline);
+  }
+  if (contact) {
+    for (let i = 0; i < 14; i++) TP("");
+    TP(contact, false);
+  }
   const P = (type, text, center) =>
     paras.push(
       `    <Paragraph Type="${type}"${center ? ' Alignment="Center"' : ""}><Text>${escXML(text)}</Text></Paragraph>`
@@ -213,11 +251,7 @@ ${paras.join("\n")}
   </Content>
   <TitlePage>
     <Content>
-      <Paragraph Alignment="Center"><Text>${escXML(doc.title.toUpperCase())}</Text></Paragraph>
-      <Paragraph Alignment="Center"><Text></Text></Paragraph>
-      <Paragraph Alignment="Center"><Text>${doc.titlePage && doc.titlePage.byline ? "Written by" : ""}</Text></Paragraph>
-      <Paragraph Alignment="Center"><Text>${escXML((doc.titlePage && doc.titlePage.byline) || "")}</Text></Paragraph>
-      <Paragraph Alignment="Left"><Text>${escXML((doc.titlePage && doc.titlePage.contact) || "")}</Text></Paragraph>
+${tpParas.join("\n")}
     </Content>
   </TitlePage>
 </FinalDraft>`;
@@ -417,9 +451,9 @@ function timeAgo(ts) {
 }
 
 /* ---------------- element (one screenplay line) ---------------- */
-function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlur, focused, suggestions = [], onPasteLines }) {
+function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlur, focused, suggestions = [], emptySuggestions = [], onPasteLines }) {
   const ref = useRef(null);
-  const [menu, setMenu] = useState(null); // { items: [{label, insert}], index }
+  const [menu, setMenu] = useState(null); // { items: [{label, insert}], index, interacted }
 
   const resize = useCallback(() => {
     const ta = ref.current;
@@ -434,7 +468,10 @@ function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlu
     if (focusTarget && focusTarget.id === el.id && ref.current) {
       const ta = ref.current;
       ta.focus();
-      const pos = focusTarget.caret === "start" ? 0 : ta.value.length;
+      const pos =
+        focusTarget.caret === "start" ? 0
+        : focusTarget.caret === "end" ? ta.value.length
+        : Math.min(Number(focusTarget.caret) || 0, ta.value.length);
       ta.setSelectionRange(pos, pos);
     }
   }, [focusTarget, el.id]);
@@ -450,13 +487,16 @@ function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlu
       items = CHAR_EXTENSIONS
         .filter((x) => x.startsWith(frag) && x !== frag)
         .map((x) => ({ label: base + x, insert: base + x }));
-    } else if (t.trim().length >= 1) {
+    } else if (!t.trim()) {
+      /* empty line: offer prior speakers, alternating speaker first (SmartType style) */
+      items = emptySuggestions.slice(0, 5).map((n) => ({ label: n, insert: n }));
+    } else {
       items = suggestions
         .filter((n) => n.startsWith(t.trim()) && n !== t.trim())
         .slice(0, 5)
         .map((n) => ({ label: n, insert: n }));
     }
-    setMenu(items.length ? { items, index: 0 } : null);
+    setMenu(items.length ? { items, index: 0, interacted: false } : null);
   };
 
   const accept = (item) => {
@@ -470,12 +510,23 @@ function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlu
 
   const handleKey = (e) => {
     if (menu) {
-      if (e.key === "ArrowDown") { e.preventDefault(); setMenu((m) => ({ ...m, index: (m.index + 1) % m.items.length })); return; }
-      if (e.key === "ArrowUp") { e.preventDefault(); setMenu((m) => ({ ...m, index: (m.index - 1 + m.items.length) % m.items.length })); return; }
-      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); accept(menu.items[menu.index]); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); setMenu((m) => ({ ...m, index: (m.index + 1) % m.items.length, interacted: true })); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setMenu((m) => ({ ...m, index: (m.index - 1 + m.items.length) % m.items.length, interacted: true })); return; }
+      if (e.key === "Tab") { e.preventDefault(); accept(menu.items[menu.index]); return; }
+      if (e.key === "Enter") {
+        /* on an empty, untouched suggestion menu, Enter means "no name": fall through
+           so double-Enter converts to action; if the user typed or arrowed, accept */
+        if (el.text.trim() || menu.interacted) { e.preventDefault(); accept(menu.items[menu.index]); return; }
+        setMenu(null);
+      }
       if (e.key === "Escape") { setMenu(null); return; }
     }
     onKeyDown(e, sceneId, el.id);
+  };
+
+  const handleFocus = () => {
+    onFocus(el.id);
+    updateMenu(el.text);
   };
 
   const headingish = el.type === "action" && !el.pairId && HEADING_RE.test(el.text.trim());
@@ -490,7 +541,7 @@ function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlu
         placeholder={PLACEHOLDER[el.type]}
         onChange={(e) => { onChange(sceneId, el.id, e.target.value); updateMenu(e.target.value); }}
         onKeyDown={handleKey}
-        onFocus={() => onFocus(el.id)}
+        onFocus={handleFocus}
         onBlur={() => { setTimeout(() => setMenu(null), 150); onBlur(); }}
         onPaste={(e) => {
           const t = e.clipboardData && e.clipboardData.getData("text");
@@ -530,6 +581,15 @@ export default function Screenwriter() {
   const [boardOpen, setBoardOpen] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth > 980 : true
   );
+  const [boardFull, setBoardFull] = useState(false);
+  const [streak, setStreak] = useState(() => {
+    try {
+      const s = JSON.parse(storage.api.getItem("screenwriter-streak") || "null");
+      return s && typeof s.streak === "number" ? s : { streak: 0, last: "" };
+    } catch { return { streak: 0, last: "" }; }
+  });
+  const streakRef = useRef(streak);
+  streakRef.current = streak;
   const [charsOpen, setCharsOpen] = useState(false);
   const [treatmentOpen, setTreatmentOpen] = useState(false);
   const [treatmentWide, setTreatmentWide] = useState(false);
@@ -539,6 +599,52 @@ export default function Screenwriter() {
     try { return storage.api.getItem("screenwriter-night") === "1"; } catch { return false; }
   });
   const [pomo, setPomo] = useState(null); // { phase: 'work'|'break', remaining, running }
+
+  /* ---- undo/redo: snapshot history of the script (Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y) ---- */
+  const histRef = useRef({ stack: [], idx: -1, quiet: false });
+
+  useEffect(() => {
+    const h = histRef.current;
+    if (h.quiet) { h.quiet = false; return; }
+    const t = setTimeout(() => {
+      const snap = JSON.stringify(doc.scenes);
+      if (h.stack[h.idx] === snap) return;
+      h.stack = h.stack.slice(0, h.idx + 1);
+      h.stack.push(snap);
+      if (h.stack.length > 80) h.stack.shift();
+      h.idx = h.stack.length - 1;
+    }, 400);
+    return () => clearTimeout(t);
+  }, [doc.scenes]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z" && e.key.toLowerCase() !== "y") return;
+      if (e.target && e.target.closest && e.target.closest(".treatment-editor")) return; // native undo there
+      const h = histRef.current;
+      const redo = e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey);
+      e.preventDefault();
+      if (redo) {
+        if (h.idx < h.stack.length - 1) {
+          h.idx += 1;
+          h.quiet = true;
+          setDoc((d) => ({ ...d, scenes: JSON.parse(h.stack[h.idx]) }));
+        }
+      } else if (h.idx > 0) {
+        h.idx -= 1;
+        h.quiet = true;
+        setDoc((d) => ({ ...d, scenes: JSON.parse(h.stack[h.idx]) }));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  /* fresh history per project so undo never crosses into another script */
+  useEffect(() => {
+    histRef.current = { stack: [JSON.stringify(doc.scenes)], idx: 0, quiet: false };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentId]);
 
   /* pomodoro tick: 25 min focus, 5 min break, gentle beep at each switch */
   useEffect(() => {
@@ -928,13 +1034,23 @@ export default function Screenwriter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloud.connected, cloud.clientId]);
 
-  /* ---- autosave ---- */
+  /* ---- autosave (also tracks the daily writing streak) ---- */
   useEffect(() => {
     if (skipNextSave.current) { skipNextSave.current = false; return; }
     setSaveState("saving");
     const t = setTimeout(() => {
       persist(currentId, doc);
       setSaveState("saved");
+      const today = new Date().toISOString().slice(0, 10);
+      if (streakRef.current.last !== today) {
+        const yesterday = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+        const next = {
+          streak: streakRef.current.last === yesterday ? streakRef.current.streak + 1 : 1,
+          last: today,
+        };
+        setStreak(next);
+        try { storage.api.setItem("screenwriter-streak", JSON.stringify(next)); } catch {}
+      }
     }, 500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1155,10 +1271,12 @@ export default function Screenwriter() {
   const moveScene = (from, to) => {
     if (from === to || from === null || to === null) return;
     setDoc((d) => {
+      /* act flags stay anchored to their position in the list; only the cards move */
+      const actsAtPosition = d.scenes.map((s) => s.act || null);
       const scenes = [...d.scenes];
       const [sc] = scenes.splice(from, 1);
       scenes.splice(to > from ? to - 1 : to, 0, sc);
-      return { ...d, scenes };
+      return { ...d, scenes: scenes.map((s, i) => ({ ...s, act: actsAtPosition[i] })) };
     });
   };
 
@@ -1193,10 +1311,38 @@ export default function Screenwriter() {
       const el = scene.elements[idx];
       if (!el) return d;
 
-      /* enter: new element with smart next type */
+      /* enter: Final Draft style element flow */
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        /* typed INT./EXT. on an action line? split into a new scene, Final Draft style */
+
+        const isEmpty = !el.text.trim();
+
+        /* empty line inside a dual dialogue block: step out of the block entirely */
+        if (isEmpty && el.pairId) {
+          const next = newElement("action");
+          const elements = scene.elements.filter((x) => x.id !== elId);
+          let insertAt = elements.length;
+          for (let k = 0; k < elements.length; k++) {
+            if (elements[k].pairId === el.pairId) insertAt = k + 1;
+          }
+          elements.splice(insertAt, 0, next);
+          setTimeout(() => setFocusTarget({ id: next.id, caret: "start", ts: Date.now() }), 0);
+          return { ...d, scenes: d.scenes.map((s) => (s.id === sceneId ? { ...s, elements } : s)) };
+        }
+
+        /* empty character/dialogue/parenthetical/transition: convert in place to action (double-Enter flow) */
+        if (isEmpty && el.type !== "action") {
+          return {
+            ...d,
+            scenes: d.scenes.map((s) =>
+              s.id !== sceneId
+                ? s
+                : { ...s, elements: s.elements.map((x) => (x.id !== elId ? x : { ...x, type: "action" })) }
+            ),
+          };
+        }
+
+        /* typed INT./EXT. on an action line? split into a new scene */
         if (el.type === "action" && !el.pairId && HEADING_RE.test(el.text.trim())) {
           const sIdx = d.scenes.findIndex((s) => s.id === sceneId);
           const before = scene.elements.slice(0, idx);
@@ -1214,8 +1360,18 @@ export default function Screenwriter() {
           setTimeout(() => setFocusTarget({ id: focusEl.id, caret: "start", ts: Date.now() }), 0);
           return { ...d, scenes };
         }
+
         const next = newElement(NEXT_TYPE[el.type] || "action");
-        if (el.pairId) { next.pairId = el.pairId; next.pairSide = el.pairSide; }
+        /* stay inside the dual block only if more paired lines follow; the last right-column
+           line exits back to normal single-column flow automatically */
+        if (el.pairId) {
+          const after = scene.elements[idx + 1];
+          const isLastOfBlock = !after || after.pairId !== el.pairId;
+          if (!(el.pairSide === "right" && isLastOfBlock)) {
+            next.pairId = el.pairId;
+            next.pairSide = el.pairSide;
+          }
+        }
         const elements = [...scene.elements];
         elements.splice(idx + 1, 0, next);
         setTimeout(() => setFocusTarget({ id: next.id, caret: "end", ts: Date.now() }), 0);
@@ -1247,6 +1403,29 @@ export default function Screenwriter() {
         const prev = scene.elements[idx - 1];
         const elements = scene.elements.filter((x) => x.id !== elId);
         if (prev) setTimeout(() => setFocusTarget({ id: prev.id, caret: "end", ts: Date.now() }), 0);
+        return {
+          ...d,
+          scenes: d.scenes.map((s) => (s.id === sceneId ? { ...s, elements } : s)),
+        };
+      }
+
+      /* backspace at the start of a non-empty line: merge it into the previous line,
+         so deleting flows continuously across elements like a normal editor */
+      if (
+        e.key === "Backspace" &&
+        el.text !== "" &&
+        e.target.selectionStart === 0 &&
+        e.target.selectionEnd === 0 &&
+        idx > 0 &&
+        !el.pairId && !scene.elements[idx - 1].pairId
+      ) {
+        e.preventDefault();
+        const prev = scene.elements[idx - 1];
+        const joinAt = prev.text.length;
+        const elements = scene.elements
+          .filter((x) => x.id !== elId)
+          .map((x) => (x.id !== prev.id ? x : { ...x, text: prev.text + el.text }));
+        setTimeout(() => setFocusTarget({ id: prev.id, caret: joinAt, ts: Date.now() }), 0);
         return {
           ...d,
           scenes: d.scenes.map((s) => (s.id === sceneId ? { ...s, elements } : s)),
@@ -1457,10 +1636,15 @@ export default function Screenwriter() {
               : "Autosave is session-only in this preview"
           }>
             <Circle size={7} fill="currentColor" />
-            {saveState === "saved" ? "Saved" : "Saving"}
+            <span className="save-word">{saveState === "saved" ? "Saved" : "Saving"}</span>
           </span>
           {cloud.connected && (!sessionEmail || cloudStatus === "error") && (
             <span className="sync-warn" title="Cloud sync isn't active. Click the cloud icon to reconnect.">not synced</span>
+          )}
+          {streak.streak > 0 && (
+            <span className="streak-chip" title={`${streak.streak}-day writing streak`}>
+              <Flame size={11} />{streak.streak}
+            </span>
           )}
           {pomo && (
             <span
@@ -1715,7 +1899,7 @@ export default function Screenwriter() {
 
         {/* scene board */}
         {boardOpen && (
-          <aside className="board">
+          <aside className={`board${boardFull ? " full" : ""}`}>
             <div className="board-head">
               {selectedScenes.size ? (
                 <>
@@ -1733,13 +1917,16 @@ export default function Screenwriter() {
                 <>
                   <span>
                     Scenes
-                    {doc.scenes.some((s) => s.done) && (
-                      <span className="scene-progress"> {doc.scenes.filter((s) => s.done).length}/{doc.scenes.length}</span>
-                    )}
+                    <span className="scene-progress"> {doc.scenes.filter((s) => s.done).length}/{doc.scenes.length}</span>
                   </span>
-                  <button className="mini-btn" onClick={() => addScene()}>
-                    <Plus size={13} /> Scene
-                  </button>
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button className="ghost" title={boardFull ? "Back to sidebar" : "Full-screen planning board"} onClick={() => setBoardFull((v) => !v)}>
+                      <Maximize2 size={13} />
+                    </button>
+                    <button className="mini-btn" onClick={() => addScene()}>
+                      <Plus size={13} /> Scene
+                    </button>
+                  </span>
                 </>
               )}
             </div>
@@ -1809,20 +1996,22 @@ export default function Screenwriter() {
         {/* editor */}
         <main className="editor-scroll">
           <div className="page" ref={pageRef}>
-            <div className="print-title-page" aria-hidden="true">
-              <div className="ptp-center">
-                <div className="ptp-title">{doc.title.toUpperCase()}</div>
-                {doc.titlePage && doc.titlePage.byline && (
-                  <>
-                    <div className="ptp-by">Written by</div>
-                    <div className="ptp-byline">{doc.titlePage.byline}</div>
-                  </>
+            {(doc.titlePage && (doc.titlePage.byline || doc.titlePage.contact)) ? (
+              <div className="print-title-page" aria-hidden="true">
+                <div className="ptp-center">
+                  <div className="ptp-title">{doc.title.toUpperCase()}</div>
+                  {doc.titlePage.byline && (
+                    <>
+                      <div className="ptp-by">Written by</div>
+                      <div className="ptp-byline">{doc.titlePage.byline}</div>
+                    </>
+                  )}
+                </div>
+                {doc.titlePage.contact && (
+                  <div className="ptp-contact">{doc.titlePage.contact}</div>
                 )}
               </div>
-              {doc.titlePage && doc.titlePage.contact && (
-                <div className="ptp-contact">{doc.titlePage.contact}</div>
-              )}
-            </div>
+            ) : null}
             <span ref={lineProbeRef} className="line-probe" aria-hidden="true">Wg</span>
             {showBreaks && pageBreaks.map((b) => (
               <div key={b.page} className="page-break" style={{ top: b.y }}>
@@ -1870,6 +2059,18 @@ export default function Screenwriter() {
                         onFocus={setFocusedEl}
                         onBlur={() => setFocusedEl(null)}
                         suggestions={allChars}
+                        emptySuggestions={(() => {
+                          if (g.el.type !== "character") return [];
+                          const seen = [];
+                          for (let k = g.idx - 1; k >= 0 && seen.length < 4; k--) {
+                            const e2 = sc.elements[k];
+                            if (e2.type !== "character") continue;
+                            const n = e2.text.toUpperCase().replace(/\(.*?\)/g, "").trim();
+                            if (n && !seen.includes(n)) seen.push(n);
+                          }
+                          /* alternating speaker first: the one before the last speaker */
+                          return seen.length > 1 ? [seen[1], seen[0], ...seen.slice(2)] : seen;
+                        })()}
                         onPasteLines={pasteLines}
                       />
                       {canPairFrom(sc.elements, g.idx) && (
@@ -2510,6 +2711,30 @@ const CSS = `
 .card:has(.scene-check.done) .card-heading { color: var(--faint); }
 .scene-progress { color: var(--accent); margin-left: 4px; }
 
+/* ---- full-screen planning board ---- */
+.board.full {
+  position: absolute; z-index: 6; inset: 0; top: 0;
+  width: 100%; flex-basis: 100%;
+  border-right: none;
+}
+.board.full .cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px; align-content: start;
+  padding: 6px 18px 40px;
+}
+.board.full .cards > div { display: contents; }
+.board.full .act-row { grid-column: 1 / -1; margin: 10px 4px 0; }
+.board.full .card { margin-bottom: 0; }
+.board.full .drop-end { grid-column: 1 / -1; }
+
+/* ---- streak chip ---- */
+.streak-chip {
+  display: flex; align-items: center; gap: 3px;
+  font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600;
+  color: #C46A2B;
+}
+
 /* ---- scene tools in the editor ---- */
 .scene-tools { display: none; align-items: center; margin-left: 8px; flex: 0 0 auto; }
 .heading-row:hover .scene-tools { display: flex; }
@@ -2586,12 +2811,16 @@ const CSS = `
   .editor-scroll { overflow: visible; }
   .page {
     box-shadow: none; border-radius: 0;
-    width: 100%; margin: 0; padding: 0; min-height: 0;
+    width: 100%; margin: 0;
+    /* zero @page margins hide the browser's URL/timestamp header and footer;
+       real screenplay margins come from this padding instead */
+    padding: 1in 1in 1in 1.5in !important;
+    min-height: 0;
     background: #fff; color: #000;
   }
   .print-title-page {
     display: flex !important; flex-direction: column;
-    height: 9in; page-break-after: always;
+    height: 8.6in; page-break-after: always;
     font-family: 'Courier Prime', monospace; color: #000;
   }
   .ptp-center { margin: auto; text-align: center; }
@@ -2600,7 +2829,7 @@ const CSS = `
   .ptp-byline { margin-top: 10px; font-size: 14px; }
   .ptp-contact { font-size: 12px; white-space: pre-line; }
   .heading-input, .el-row textarea { color: #000; }
-  @page { margin: 1in 1in 1in 1.5in; size: letter; }
+  @page { margin: 0; size: letter; }
 }
 
 /* ---- characters panel ---- */
@@ -2666,7 +2895,8 @@ const CSS = `
   .tb-left { flex: 1; min-width: 0; }
   .tb-right { flex: 0 0 auto; margin-left: auto; }
   .theme-strip { order: 3; width: 100%; }
-  .title-input { width: 90px; font-size: 11px; }
+  .title-input { flex: 1; width: auto; min-width: 50px; font-size: 11px; }
+  .save-word, .streak-chip { display: none; }
   .icon-btn { width: 28px; height: 28px; }
   .export-btn { padding: 5px 9px; font-size: 11px; }
   .page-est, .sync-warn { display: none; }
