@@ -216,6 +216,146 @@ ${paras.join("\n")}
 </FinalDraft>`;
 }
 
+/* ---- import: read a real Final Draft FDX file back into our doc shape ---- */
+function parseFDX(xmlText) {
+  const dom = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (dom.querySelector("parsererror")) throw new Error("That doesn't look like a valid FDX file.");
+  const contentEl = dom.querySelector("Content");
+  if (!contentEl) throw new Error("Couldn't find script content in that file.");
+
+  const textOf = (paragraphEl) =>
+    Array.from(paragraphEl.children)
+      .filter((c) => c.tagName === "Text")
+      .map((c) => c.textContent)
+      .join("");
+
+  const scenes = [];
+  let currentScene = null;
+  const ensureScene = () => {
+    if (!currentScene) {
+      currentScene = newScene();
+      currentScene.heading = "";
+      currentScene.elements = [];
+      scenes.push(currentScene);
+    }
+    return currentScene;
+  };
+  const typeToInternal = { Action: "action", Character: "character", Dialogue: "dialogue", Parenthetical: "parenthetical", Transition: "transition" };
+
+  Array.from(contentEl.children)
+    .filter((c) => c.tagName === "Paragraph")
+    .forEach((p) => {
+      const type = p.getAttribute("Type");
+      if (type === "Scene Heading") {
+        currentScene = newScene();
+        currentScene.heading = textOf(p).trim();
+        currentScene.elements = [];
+        scenes.push(currentScene);
+        return;
+      }
+      const dualEl = Array.from(p.children).find((c) => c.tagName === "DualDialogue");
+      if (dualEl) {
+        const scene = ensureScene();
+        const pairId = uid();
+        let side = "left";
+        let charCount = 0;
+        Array.from(dualEl.children)
+          .filter((c) => c.tagName === "Paragraph")
+          .forEach((sp) => {
+            const t = sp.getAttribute("Type");
+            if (t === "Character") { charCount++; if (charCount === 2) side = "right"; }
+            const elType = typeToInternal[t] || "action";
+            scene.elements.push({ id: uid(), type: elType, text: textOf(sp), pairId, pairSide: side });
+          });
+        return;
+      }
+      if (typeToInternal[type]) {
+        ensureScene().elements.push({ id: uid(), type: typeToInternal[type], text: textOf(p) });
+      }
+    });
+
+  const cleanScenes = scenes
+    .map((s) => ({ ...s, elements: s.elements.length ? s.elements : [newElement()] }))
+    .filter((s) => s.heading.trim() || s.elements.some((e) => e.text.trim()));
+  if (!cleanScenes.length) throw new Error("Didn't find any scenes in that file.");
+
+  let title = "IMPORTED SCRIPT";
+  const titlePara = dom.querySelector("TitlePage Content Paragraph");
+  if (titlePara) {
+    const t = textOf(titlePara).trim();
+    if (t) title = t;
+  }
+
+  return { title, theme: "", treatment: "", characters: {}, scenes: cleanScenes };
+}
+
+/* ---- import: best-guess parse of plain pasted screenplay text ---- */
+function parseScriptText(text) {
+  const isSceneHeading = (line) => /^(INT|EXT|INT\.\/EXT|I\/E)[./ ]/i.test(line);
+  const isTransition = (line) => /(TO:|FADE (IN|OUT)\.?)$/i.test(line) && line === line.toUpperCase() && line.length < 30;
+  const isParenthetical = (line) => /^\(.*\)$/.test(line);
+  const looksLikeCue = (line) => line && line === line.toUpperCase() && line.length <= 40 && !/[.!?]$/.test(line);
+
+  const scenes = [];
+  let currentScene = null;
+  const ensureScene = () => {
+    if (!currentScene) {
+      currentScene = newScene();
+      currentScene.heading = "";
+      currentScene.elements = [];
+      scenes.push(currentScene);
+    }
+    return currentScene;
+  };
+
+  let lastWasCharacter = false;
+  text.split(/\r?\n/).forEach((raw) => {
+    const line = raw.trim();
+    if (!line) { lastWasCharacter = false; return; }
+
+    if (isSceneHeading(line)) {
+      currentScene = newScene();
+      currentScene.heading = line;
+      currentScene.elements = [];
+      scenes.push(currentScene);
+      lastWasCharacter = false;
+      return;
+    }
+    const scene = ensureScene();
+    if (isTransition(line)) {
+      scene.elements.push({ id: uid(), type: "transition", text: line });
+      lastWasCharacter = false;
+      return;
+    }
+    if (isParenthetical(line)) {
+      scene.elements.push({ id: uid(), type: "parenthetical", text: line });
+      return;
+    }
+    if (looksLikeCue(line) && !lastWasCharacter) {
+      scene.elements.push({ id: uid(), type: "character", text: line });
+      lastWasCharacter = true;
+      return;
+    }
+    const prev = scene.elements[scene.elements.length - 1];
+    if (lastWasCharacter || (prev && (prev.type === "dialogue" || prev.type === "parenthetical"))) {
+      if (!lastWasCharacter && prev && prev.type === "dialogue") {
+        prev.text = `${prev.text} ${line}`; // wrapped line continues the same speech
+      } else {
+        scene.elements.push({ id: uid(), type: "dialogue", text: line });
+      }
+      lastWasCharacter = false;
+      return;
+    }
+    scene.elements.push({ id: uid(), type: "action", text: line });
+  });
+
+  const cleanScenes = scenes
+    .map((s) => ({ ...s, elements: s.elements.length ? s.elements : [newElement()] }))
+    .filter((s) => s.heading.trim() || s.elements.some((e) => e.text.trim()));
+  if (!cleanScenes.length) throw new Error("Didn't find any text to import.");
+  return { title: "IMPORTED SCRIPT", theme: "", treatment: "", characters: {}, scenes: cleanScenes };
+}
+
 function downloadFile(name, content, type) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -229,6 +369,10 @@ function downloadFile(name, content, type) {
 }
 
 const CLOUD_KEY = "screenwriter-cloud-v1";
+
+const HEADING_RE = /^(INT|EXT|INT\/EXT|I\/E|EST)[.\s]/i;
+const TRANSITION_RE = /^[A-Z0-9 '.]+TO:$/;
+const CHAR_EXTENSIONS = ["(V.O.)", "(O.S.)", "(CONT'D)", "(PRE-LAP)", "(INTO PHONE)"];
 
 let gsiLoadPromise = null;
 function loadGoogleScript() {
@@ -261,8 +405,9 @@ function timeAgo(ts) {
 }
 
 /* ---------------- element (one screenplay line) ---------------- */
-function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlur, focused }) {
+function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlur, focused, suggestions = [], onPasteLines }) {
   const ref = useRef(null);
+  const [menu, setMenu] = useState(null); // { items: [{label, insert}], index }
 
   const resize = useCallback(() => {
     const ta = ref.current;
@@ -282,6 +427,45 @@ function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlu
     }
   }, [focusTarget, el.id]);
 
+  const updateMenu = (text) => {
+    if (el.type !== "character") { setMenu(null); return; }
+    const t = text.toUpperCase();
+    let items = [];
+    const parenMatch = t.match(/^(.*?)(\([A-Z.' -]*)$/);
+    if (parenMatch) {
+      const base = parenMatch[1];
+      const frag = parenMatch[2];
+      items = CHAR_EXTENSIONS
+        .filter((x) => x.startsWith(frag) && x !== frag)
+        .map((x) => ({ label: base + x, insert: base + x }));
+    } else if (t.trim().length >= 1) {
+      items = suggestions
+        .filter((n) => n.startsWith(t.trim()) && n !== t.trim())
+        .slice(0, 5)
+        .map((n) => ({ label: n, insert: n }));
+    }
+    setMenu(items.length ? { items, index: 0 } : null);
+  };
+
+  const accept = (item) => {
+    onChange(sceneId, el.id, item.insert);
+    setMenu(null);
+    if (ref.current) {
+      const ta = ref.current;
+      setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 0);
+    }
+  };
+
+  const handleKey = (e) => {
+    if (menu) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setMenu((m) => ({ ...m, index: (m.index + 1) % m.items.length })); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setMenu((m) => ({ ...m, index: (m.index - 1 + m.items.length) % m.items.length })); return; }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); accept(menu.items[menu.index]); return; }
+      if (e.key === "Escape") { setMenu(null); return; }
+    }
+    onKeyDown(e, sceneId, el.id);
+  };
+
   return (
     <div className={`el-row el-${el.type}${focused ? " focused" : ""}`}>
       <span className="el-type-label">{TYPE_LABEL[el.type]}</span>
@@ -290,12 +474,32 @@ function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlu
         rows={1}
         value={el.text}
         placeholder={PLACEHOLDER[el.type]}
-        onChange={(e) => { onChange(sceneId, el.id, e.target.value); }}
-        onKeyDown={(e) => onKeyDown(e, sceneId, el.id)}
+        onChange={(e) => { onChange(sceneId, el.id, e.target.value); updateMenu(e.target.value); }}
+        onKeyDown={handleKey}
         onFocus={() => onFocus(el.id)}
-        onBlur={onBlur}
+        onBlur={() => { setTimeout(() => setMenu(null), 150); onBlur(); }}
+        onPaste={(e) => {
+          const t = e.clipboardData && e.clipboardData.getData("text");
+          if (t && t.includes("\n") && onPasteLines) {
+            e.preventDefault();
+            onPasteLines(sceneId, el.id, t);
+          }
+        }}
         spellCheck={false}
       />
+      {menu && (
+        <div className="ac-menu">
+          {menu.items.map((it, i) => (
+            <div
+              key={it.label}
+              className={`ac-item${i === menu.index ? " active" : ""}`}
+              onMouseDown={(e) => { e.preventDefault(); accept(it); }}
+            >
+              {it.label}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -502,7 +706,7 @@ export default function Screenwriter() {
       `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`
     );
 
-  const downloadFile = async (fileId) => {
+  const fetchDriveFile = async (fileId) => {
     const res = await driveFetch({}, `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
     try { return JSON.parse(await res.text()); } catch { return null; }
   };
@@ -527,7 +731,7 @@ export default function Screenwriter() {
     const folderId = cfg.folderId || (await ensureFolder());
     const fileId = cfg.fileId || (await findFile(folderId));
     if (!fileId) return { remote: null, folderId, fileId: null };
-    const data = await downloadFile(fileId);
+    const data = await fetchDriveFile(fileId);
     return { remote: data && Array.isArray(data.library) ? data : null, folderId, fileId };
   };
 
@@ -819,6 +1023,24 @@ export default function Screenwriter() {
       /* enter: new element with smart next type */
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
+        /* typed INT./EXT. on an action line? split into a new scene, Final Draft style */
+        if (el.type === "action" && !el.pairId && HEADING_RE.test(el.text.trim())) {
+          const sIdx = d.scenes.findIndex((s) => s.id === sceneId);
+          const before = scene.elements.slice(0, idx);
+          const after = scene.elements.slice(idx + 1);
+          const ns = {
+            id: uid(),
+            act: null,
+            heading: el.text.trim(),
+            elements: after.length ? after : [newElement()],
+          };
+          const scenes = [...d.scenes];
+          scenes[sIdx] = { ...scene, elements: before.length ? before : [newElement()] };
+          scenes.splice(sIdx + 1, 0, ns);
+          const focusEl = ns.elements[0];
+          setTimeout(() => setFocusTarget({ id: focusEl.id, caret: "start", ts: Date.now() }), 0);
+          return { ...d, scenes };
+        }
         const next = newElement(NEXT_TYPE[el.type] || "action");
         if (el.pairId) { next.pairId = el.pairId; next.pairSide = el.pairSide; }
         const elements = [...scene.elements];
@@ -939,19 +1161,73 @@ export default function Screenwriter() {
   const exportFDX = () => downloadFile(`${safeName(doc.title)}.fdx`, buildFDX(doc), "application/xml");
   const exportJSON = () =>
     downloadFile(`${safeName(doc.title)}-backup.json`, JSON.stringify(doc, null, 2), "application/json");
-  const importJSON = (e) => {
+  const openImported = (title, scenes) => {
+    const newDoc = { ...DEFAULT_DOC, title, scenes };
+    persist(currentId, doc);
+    const id = uid();
+    saveProjectDoc(id, newDoc);
+    setLibrary((lib) => {
+      const next = [{ id, title, updatedAt: Date.now() }, ...lib];
+      saveLibrary(next);
+      return next;
+    });
+    skipNextSave.current = true;
+    setCurrentId(id);
+    setDoc(newDoc);
+  };
+
+  const importFile = (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
+    const name = f.name.toLowerCase();
     const r = new FileReader();
     r.onload = () => {
+      const content = r.result;
       try {
-        const d = JSON.parse(r.result);
-        if (d && Array.isArray(d.scenes)) setDoc(d);
-      } catch {}
+        if (name.endsWith(".json")) {
+          const d = JSON.parse(content);
+          if (d && Array.isArray(d.scenes)) setDoc(d);
+          else window.alert("That backup file doesn't look right.");
+          return;
+        }
+        const imported = name.endsWith(".fdx") ? parseFDX(content) : parseScriptText(content);
+        const fallbackTitle = f.name.replace(/\.[^.]+$/, "").toUpperCase();
+        const title =
+          imported.title && imported.title !== "IMPORTED SCRIPT" ? imported.title : fallbackTitle;
+        openImported(title, imported.scenes);
+      } catch (err) {
+        window.alert(err && err.message ? err.message : "Couldn't read that file. Try a .fdx or plain text file.");
+      }
     };
     r.readAsText(f);
     e.target.value = "";
   };
+
+  /* multi-line paste: parse into elements/scenes and insert at the cursor's spot */
+  const pasteLines = (sceneId, elId, textRaw) =>
+    setDoc((d) => {
+      let parsed;
+      try { parsed = parseScriptText(textRaw).scenes; } catch { return d; }
+      if (!parsed || !parsed.length) return d;
+      const scenes = [...d.scenes];
+      const sIdx = scenes.findIndex((s) => s.id === sceneId);
+      if (sIdx === -1) return d;
+      const scene = scenes[sIdx];
+      const eIdx = scene.elements.findIndex((el) => el.id === elId);
+      if (eIdx === -1) return d;
+      const first = parsed[0];
+      if (!first.heading) {
+        // first chunk has no scene heading: weave it into the current scene at the cursor
+        const currentEmpty = !scene.elements[eIdx].text.trim();
+        const before = currentEmpty ? scene.elements.slice(0, eIdx) : scene.elements.slice(0, eIdx + 1);
+        const after = scene.elements.slice(eIdx + 1);
+        scenes[sIdx] = { ...scene, elements: [...before, ...first.elements, ...after] };
+        parsed.shift();
+        if (!scenes[sIdx].elements.length) scenes[sIdx] = { ...scenes[sIdx], elements: [newElement()] };
+      }
+      if (parsed.length) scenes.splice(sIdx + 1, 0, ...parsed);
+      return { ...d, scenes };
+    });
 
   const snippet = (sc) => {
     const el = sc.elements.find((e) => e.text.trim());
@@ -1014,10 +1290,10 @@ export default function Screenwriter() {
           <button className="icon-btn" title="Backup (.json)" onClick={exportJSON}>
             <FileJson size={15} />
           </button>
-          <button className="icon-btn" title="Restore backup" onClick={() => fileRef.current && fileRef.current.click()}>
+          <button className="icon-btn" title="Import script (.fdx, .txt) or restore backup (.json)" onClick={() => fileRef.current && fileRef.current.click()}>
             <Upload size={15} />
           </button>
-          <input ref={fileRef} type="file" accept=".json" style={{ display: "none" }} onChange={importJSON} />
+          <input ref={fileRef} type="file" accept=".json,.fdx,.txt,.fountain" style={{ display: "none" }} onChange={importFile} />
           <button className="export-btn" onClick={exportFDX}>
             <Download size={14} /> FDX
           </button>
@@ -1272,6 +1548,8 @@ export default function Screenwriter() {
                         onKeyDown={handleKeyDown}
                         onFocus={setFocusedEl}
                         onBlur={() => setFocusedEl(null)}
+                        suggestions={allChars}
+                        onPasteLines={pasteLines}
                       />
                       {canPairFrom(sc.elements, g.idx) && (
                         <button
@@ -1304,6 +1582,8 @@ export default function Screenwriter() {
                             onKeyDown={handleKeyDown}
                             onFocus={setFocusedEl}
                             onBlur={() => setFocusedEl(null)}
+                            suggestions={allChars}
+                            onPasteLines={pasteLines}
                           />
                         ))}
                       </div>
@@ -1319,6 +1599,8 @@ export default function Screenwriter() {
                             onKeyDown={handleKeyDown}
                             onFocus={setFocusedEl}
                             onBlur={() => setFocusedEl(null)}
+                            suggestions={allChars}
+                            onPasteLines={pasteLines}
                           />
                         ))}
                       </div>
@@ -1689,6 +1971,25 @@ const CSS = `
   user-select: none; pointer-events: none;
 }
 .el-row.focused .el-type-label { display: block; }
+
+/* ---- character autocomplete ---- */
+.ac-menu {
+  position: absolute; z-index: 10; top: 100%; left: 2.2in;
+  min-width: 2.2in;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(20,20,15,.12);
+  overflow: hidden;
+}
+.dual-col .ac-menu { left: 0; }
+.ac-item {
+  padding: 5px 10px;
+  font-family: 'Jost', sans-serif; font-size: 11px; letter-spacing: 0.05em;
+  color: var(--text);
+  cursor: pointer;
+}
+.ac-item.active, .ac-item:hover { background: var(--panel2); color: var(--accent); }
 
 /* ---- dual dialogue ---- */
 .single-line-wrap { position: relative; }
