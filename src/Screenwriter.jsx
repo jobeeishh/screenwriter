@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload,
-  Clapperboard, ChevronRight, Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText
+  Clapperboard, ChevronRight, Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText,
+  History, RotateCcw, SeparatorHorizontal, Bold, List, Maximize2
 } from "lucide-react";
 
 /* ---------------- storage (guarded: falls back to in-memory) ---------------- */
@@ -156,6 +157,7 @@ const DEFAULT_DOC = {
   theme: "",
   treatment: "",
   characters: {},
+  versions: [],
   scenes: [newScene()],
 };
 
@@ -466,8 +468,10 @@ function Element({ el, sceneId, focusTarget, onChange, onKeyDown, onFocus, onBlu
     onKeyDown(e, sceneId, el.id);
   };
 
+  const headingish = el.type === "action" && !el.pairId && HEADING_RE.test(el.text.trim());
+
   return (
-    <div className={`el-row el-${el.type}${focused ? " focused" : ""}`}>
+    <div className={`el-row el-${el.type}${focused ? " focused" : ""}${headingish ? " headingish" : ""}`}>
       <span className="el-type-label">{TYPE_LABEL[el.type]}</span>
       <textarea
         ref={ref}
@@ -518,13 +522,20 @@ export default function Screenwriter() {
   );
   const [charsOpen, setCharsOpen] = useState(false);
   const [treatmentOpen, setTreatmentOpen] = useState(false);
+  const [treatmentWide, setTreatmentWide] = useState(false);
+  const treatmentRef = useRef(null);
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [focusTarget, setFocusTarget] = useState(null);
   const [focusedEl, setFocusedEl] = useState(null);
   const [dragIdx, setDragIdx] = useState(null);
   const [overIdx, setOverIdx] = useState(null);
   const [newChar, setNewChar] = useState(null); // null = closed, "" = open input
+  const [selectedScenes, setSelectedScenes] = useState(() => new Set());
+  const selectAnchor = useRef(null);
   const [pageBreaks, setPageBreaks] = useState([]);
+  const [showBreaks, setShowBreaks] = useState(() => {
+    try { return storage.api.getItem("screenwriter-showbreaks") !== "0"; } catch { return true; }
+  });
   const sceneRefs = useRef({});
   const fileRef = useRef(null);
   const skipNextSave = useRef(false); // true right after switching projects
@@ -971,6 +982,97 @@ export default function Screenwriter() {
       return { ...d, scenes: scenes.length ? scenes : [newScene()] };
     });
 
+  const handleCardClick = (e, i, sc) => {
+    if (e.metaKey || e.ctrlKey) {
+      setSelectedScenes((prev) => {
+        const next = new Set(prev);
+        if (next.has(sc.id)) next.delete(sc.id);
+        else next.add(sc.id);
+        return next;
+      });
+      selectAnchor.current = i;
+      return;
+    }
+    if (e.shiftKey && selectAnchor.current !== null) {
+      const [a, b] = [Math.min(selectAnchor.current, i), Math.max(selectAnchor.current, i)];
+      setSelectedScenes(new Set(doc.scenes.slice(a, b + 1).map((s) => s.id)));
+      return;
+    }
+    setSelectedScenes(new Set());
+    selectAnchor.current = i;
+    const node = sceneRefs.current[sc.id];
+    if (node) node.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const deleteSelectedScenes = () => {
+    if (!selectedScenes.size) return;
+    if (!window.confirm(`Delete ${selectedScenes.size} scene${selectedScenes.size > 1 ? "s" : ""}? This can't be undone.`)) return;
+    setDoc((d) => {
+      const scenes = d.scenes.filter((s) => !selectedScenes.has(s.id));
+      return { ...d, scenes: scenes.length ? scenes : [newScene()] };
+    });
+    setSelectedScenes(new Set());
+    selectAnchor.current = null;
+  };
+
+  /* ---- versions: named snapshots stored inside the project, so they back up and sync too ---- */
+  const [verOpen, setVerOpen] = useState(false);
+  const [treatmentTick, setTreatmentTick] = useState(0);
+
+  const snapshotCurrent = () =>
+    JSON.parse(JSON.stringify({
+      title: doc.title, theme: doc.theme, treatment: doc.treatment || "",
+      characters: doc.characters, scenes: doc.scenes,
+    }));
+
+  const saveVersion = () => {
+    const name = window.prompt("Name this version:", `Draft ${((doc.versions || []).length) + 1}`);
+    if (!name) return;
+    const snap = snapshotCurrent();
+    setDoc((d) => ({ ...d, versions: [...(d.versions || []), { id: uid(), name: name.trim(), createdAt: Date.now(), ...snap }] }));
+  };
+
+  const restoreVersion = (vid) => {
+    const v = (doc.versions || []).find((x) => x.id === vid);
+    if (!v) return;
+    if (!window.confirm(`Restore "${v.name}"? Your current state will be saved as its own version first.`)) return;
+    const cur = snapshotCurrent();
+    setDoc((d) => ({
+      ...d,
+      versions: [...(d.versions || []), { id: uid(), name: `Before restoring ${v.name}`, createdAt: Date.now(), ...cur }],
+      title: v.title,
+      theme: v.theme,
+      treatment: v.treatment || "",
+      characters: JSON.parse(JSON.stringify(v.characters)),
+      scenes: JSON.parse(JSON.stringify(v.scenes)),
+    }));
+    setTreatmentTick((t) => t + 1);
+    setVerOpen(false);
+  };
+
+  const deleteVersion = (vid) => {
+    const v = (doc.versions || []).find((x) => x.id === vid);
+    if (!v) return;
+    if (!window.confirm(`Delete version "${v.name}"?`)) return;
+    setDoc((d) => ({ ...d, versions: (d.versions || []).filter((x) => x.id !== vid) }));
+  };
+
+  /* load treatment content into the editor when opened, switching projects, or restoring a version */
+  useEffect(() => {
+    if (!treatmentOpen) return;
+    const el = treatmentRef.current;
+    if (!el) return;
+    let html = doc.treatment || "";
+    if (html && !/[<>]/.test(html)) {
+      // migrate old plain-text treatments
+      const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      html = html.split("\n").map(esc).join("<br>");
+    }
+    html = html.replace(/<script[\s\S]*?<\/script>/gi, "");
+    if (el.innerHTML !== html) el.innerHTML = html;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [treatmentOpen, currentId, treatmentTick]);
+
   const toggleAct = (sceneId) =>
     updateScene(sceneId, (s) =>
       s.act ? { ...s, act: null } : { ...s, act: { id: uid(), title: "ACT " } }
@@ -1141,21 +1243,8 @@ export default function Screenwriter() {
       return { ...d, characters };
     });
 
-  /* ---- page estimate ---- */
-  const pageEst = useMemo(() => {
-    let lines = 0;
-    doc.scenes.forEach((sc) => {
-      if (sc.act) lines += 2;
-      if (sc.heading.trim()) lines += 2;
-      sc.elements.forEach((e) => {
-        const len = e.text.length;
-        if (!len) { lines += 1; return; }
-        const w = e.type === "dialogue" ? 35 : e.type === "parenthetical" ? 30 : 58;
-        lines += Math.ceil(len / w) + (e.type === "dialogue" || e.type === "parenthetical" ? 0 : 1);
-      });
-    });
-    return Math.max(1, Math.round(lines / 55));
-  }, [doc.scenes]);
+  /* ---- page count comes from the measured breaks so counter and lines always agree ---- */
+  const pageCount = pageBreaks.length + 1;
 
   /* ---- import / export ---- */
   const exportFDX = () => downloadFile(`${safeName(doc.title)}.fdx`, buildFDX(doc), "application/xml");
@@ -1278,7 +1367,19 @@ export default function Screenwriter() {
         </div>
 
         <div className="tb-right">
-          <span className="page-est">~{pageEst} pp</span>
+          <span className="page-est">~{pageCount} pp</span>
+          <button
+            className={`icon-btn${showBreaks ? " on" : ""}`}
+            title={showBreaks ? "Hide page break lines" : "Show page break lines"}
+            onClick={() => {
+              setShowBreaks((v) => {
+                try { storage.api.setItem("screenwriter-showbreaks", v ? "0" : "1"); } catch {}
+                return !v;
+              });
+            }}
+          >
+            <SeparatorHorizontal size={15} />
+          </button>
           <span className={`save-dot ${saveState}`} title={
             storage.persistent
               ? (saveState === "saved" ? "Saved" : "Saving...")
@@ -1371,6 +1472,42 @@ export default function Screenwriter() {
               </div>
             )}
           </div>
+          <div className="cloud-wrap">
+            <button
+              className={`icon-btn${verOpen ? " on" : ""}`}
+              title="Versions"
+              onClick={() => setVerOpen((v) => !v)}
+            >
+              <History size={16} />
+            </button>
+            {verOpen && (
+              <div className="cloud-panel">
+                <div className="cloud-title">Versions</div>
+                <button className="cloud-btn" onClick={saveVersion} style={{ marginTop: 0 }}>
+                  Save current as version
+                </button>
+                <div className="ver-list">
+                  {(doc.versions || []).slice().reverse().map((v) => (
+                    <div className="ver-row" key={v.id}>
+                      <div className="ver-info">
+                        <div className="ver-name">{v.name}</div>
+                        <div className="ver-date">{timeAgo(v.createdAt)}</div>
+                      </div>
+                      <button className="ghost" title="Restore this version" onClick={() => restoreVersion(v.id)}>
+                        <RotateCcw size={12} />
+                      </button>
+                      <button className="ghost danger" title="Delete this version" onClick={() => deleteVersion(v.id)}>
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                  {!(doc.versions || []).length && (
+                    <div className="cloud-hint">No versions yet. Save one before a big rewrite so you can always come back.</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
           <button
             className={`icon-btn${treatmentOpen ? " on" : ""}`}
             title="Treatment notes"
@@ -1445,10 +1582,26 @@ export default function Screenwriter() {
         {boardOpen && (
           <aside className="board">
             <div className="board-head">
-              <span>Scenes</span>
-              <button className="mini-btn" onClick={() => addScene()}>
-                <Plus size={13} /> Scene
-              </button>
+              {selectedScenes.size ? (
+                <>
+                  <span>{selectedScenes.size} selected</span>
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button className="ghost danger" title="Delete selected scenes" onClick={deleteSelectedScenes}>
+                      <Trash2 size={13} />
+                    </button>
+                    <button className="ghost" title="Clear selection" onClick={() => { setSelectedScenes(new Set()); selectAnchor.current = null; }}>
+                      <X size={14} />
+                    </button>
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>Scenes</span>
+                  <button className="mini-btn" onClick={() => addScene()}>
+                    <Plus size={13} /> Scene
+                  </button>
+                </>
+              )}
             </div>
             <div className="cards" onDragLeave={() => setOverIdx(null)}>
               {doc.scenes.map((sc, i) => (
@@ -1465,16 +1618,13 @@ export default function Screenwriter() {
                     </div>
                   )}
                   <div
-                    className={`card${dragIdx === i ? " dragging" : ""}${overIdx === i ? " over" : ""}`}
+                    className={`card${dragIdx === i ? " dragging" : ""}${overIdx === i ? " over" : ""}${selectedScenes.has(sc.id) ? " selected" : ""}`}
                     draggable
                     onDragStart={(e) => { setDragIdx(i); e.dataTransfer.effectAllowed = "move"; }}
                     onDragEnd={() => { setDragIdx(null); setOverIdx(null); }}
                     onDragOver={(e) => { e.preventDefault(); setOverIdx(i); }}
                     onDrop={(e) => { e.preventDefault(); moveScene(dragIdx, i); setDragIdx(null); setOverIdx(null); }}
-                    onClick={() => {
-                      const node = sceneRefs.current[sc.id];
-                      if (node) node.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }}
+                    onClick={(e) => handleCardClick(e, i, sc)}
                   >
                     <div className="card-top">
                       <span className="card-num">{i + 1}</span>
@@ -1488,7 +1638,14 @@ export default function Screenwriter() {
                         </button>
                       </span>
                     </div>
-                    {snippet(sc) && <div className="card-snippet">{snippet(sc)}</div>}
+                    <input
+                      className="card-note"
+                      value={sc.synopsis || ""}
+                      placeholder={snippet(sc) || "Add a note..."}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => updateScene(sc.id, (s) => ({ ...s, synopsis: e.target.value }))}
+                      spellCheck={false}
+                    />
                   </div>
                 </div>
               ))}
@@ -1506,7 +1663,7 @@ export default function Screenwriter() {
         <main className="editor-scroll">
           <div className="page" ref={pageRef}>
             <span ref={lineProbeRef} className="line-probe" aria-hidden="true">Wg</span>
-            {pageBreaks.map((b) => (
+            {showBreaks && pageBreaks.map((b) => (
               <div key={b.page} className="page-break" style={{ top: b.y }}>
                 <span className="page-break-num">{b.page}.</span>
               </div>
@@ -1622,16 +1779,29 @@ export default function Screenwriter() {
 
         {/* treatment notepad */}
         {treatmentOpen && (
-          <aside className="treatment">
+          <aside className={`treatment${treatmentWide ? " wide" : ""}`}>
             <div className="board-head">
               <span>Treatment</span>
-              <button className="ghost" onClick={() => setTreatmentOpen(false)}><X size={14} /></button>
+              <span style={{ display: "flex", gap: 6 }}>
+                <button className="ghost" title="Bold (select text first)" onMouseDown={(e) => { e.preventDefault(); document.execCommand("bold"); }}>
+                  <Bold size={13} />
+                </button>
+                <button className="ghost" title="Bullet list" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }}>
+                  <List size={14} />
+                </button>
+                <button className="ghost" title={treatmentWide ? "Narrower" : "Wider"} onClick={() => setTreatmentWide((v) => !v)}>
+                  <Maximize2 size={13} />
+                </button>
+                <button className="ghost" onClick={() => setTreatmentOpen(false)}><X size={14} /></button>
+              </span>
             </div>
-            <textarea
-              className="treatment-notepad"
-              value={doc.treatment || ""}
-              placeholder="Paste or write your treatment here, just for reference while you write."
-              onChange={(e) => setDoc((d) => ({ ...d, treatment: e.target.value }))}
+            <div
+              ref={treatmentRef}
+              className="treatment-editor"
+              contentEditable
+              suppressContentEditableWarning
+              data-placeholder="Paste or write your treatment here, just for reference while you write."
+              onInput={(e) => setDoc((d) => ({ ...d, treatment: e.currentTarget.innerHTML }))}
               spellCheck={true}
             />
           </aside>
@@ -1734,13 +1904,16 @@ const CSS = `
 /* ---- top bar ---- */
 .topbar {
   height: 52px; flex: 0 0 52px;
-  display: flex; align-items: center; justify-content: space-between;
+  display: grid; grid-template-columns: 1fr minmax(160px, 400px) 1fr;
+  align-items: center;
   padding: 0 14px; gap: 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   position: relative; z-index: 5;
 }
-.tb-left, .tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tb-left, .tb-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tb-left { justify-self: start; }
+.tb-right { justify-self: end; }
 .title-input {
   background: transparent; border: none; outline: none;
   color: var(--text);
@@ -1751,9 +1924,8 @@ const CSS = `
 .title-input:focus { background: var(--panel2); }
 
 .theme-strip {
-  position: absolute; left: 50%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px;
-  max-width: min(420px, 34vw); width: 100%;
+  width: 100%;
   padding: 5px 14px;
   background: var(--panel2);
   border: 1px solid var(--line);
@@ -2129,13 +2301,38 @@ const CSS = `
   border-left: 1px solid var(--line);
   display: flex; flex-direction: column; min-height: 0;
 }
-.treatment-notepad {
-  flex: 1; resize: none; outline: none; border: none;
-  background: transparent; color: var(--text);
+.treatment.wide { width: 560px; flex: 0 0 560px; }
+.treatment-editor {
+  flex: 1; overflow-y: auto; outline: none;
+  color: var(--text);
   padding: 4px 16px 16px;
-  font-family: 'Courier Prime', monospace; font-size: 13px; line-height: 1.5;
+  font-family: 'Jost', sans-serif; font-size: 13px; line-height: 1.6;
 }
-.treatment-notepad::placeholder { color: var(--faint); font-style: italic; }
+.treatment-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--faint); font-style: italic;
+}
+.treatment-editor ul { padding-left: 20px; margin: 6px 0; }
+.treatment-editor b, .treatment-editor strong { font-weight: 700; }
+
+/* ---- scene card note ---- */
+.card-note {
+  display: block; width: 100%; margin-top: 5px;
+  background: transparent; border: none; outline: none;
+  font-family: 'Jost', sans-serif; font-size: 11px; color: var(--dim); line-height: 1.45;
+}
+.card-note::placeholder { color: var(--faint); }
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+
+/* ---- headingish action line (about to become a scene on Enter) ---- */
+.el-action.headingish textarea { text-transform: uppercase; font-weight: 700; }
+
+/* ---- version list ---- */
+.ver-list { margin-top: 10px; max-height: 240px; overflow-y: auto; }
+.ver-row { display: flex; align-items: center; gap: 6px; padding: 6px 2px; border-top: 1px solid var(--line); }
+.ver-info { flex: 1; min-width: 0; }
+.ver-name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ver-date { font-size: 10px; color: var(--faint); }
 
 /* ---- characters panel ---- */
 .chars {
@@ -2180,7 +2377,9 @@ const CSS = `
 
 /* ---- responsive ---- */
 @media (max-width: 900px) {
-  .theme-strip { max-width: 30vw; }
+  .topbar { grid-template-columns: auto minmax(120px, 1fr) auto; }
+  .title-input { width: 100px; }
+  .page-est { display: none; }
   .page { padding: 40px 28px 80px 40px; width: calc(100% - 24px); }
   .scene-num, .el-type-label { display: none !important; }
   .el-character textarea { margin-left: 26%; width: 70%; }
