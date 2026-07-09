@@ -223,8 +223,33 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     const blk = root && root.querySelector(`[data-id="${menu.blkId}"]`);
     if (blk) { setBlockText(blk, item); setCaret(blk, "end"); }
     closeMenu();
+    suppressRef.current = Date.now();
     sync(true);
   };
+
+  /* The menu follows the caret. Whenever it lands on a character line, the prior
+     speakers show up, no matter how it got there (Enter, Tab, click, arrow). */
+  const suppressRef = useRef(0);
+  useEffect(() => {
+    let raf = null;
+    const onSelChange = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const root = rootRef.current;
+        if (!root || !root.isConnected) return;
+        if (Date.now() - suppressRef.current < 250) return; // just accepted a suggestion
+        const sel = window.getSelection();
+        if (!sel || !sel.rangeCount || !sel.isCollapsed) { closeMenu(); return; }
+        if (!root.contains(sel.anchorNode)) return;
+        const blk = blockOf(sel.anchorNode, root);
+        if (blk && blk.dataset.type === "character") openMenuFor(blk);
+        else closeMenu();
+      });
+    };
+    document.addEventListener("selectionchange", onSelChange);
+    return () => { document.removeEventListener("selectionchange", onSelChange); if (raf) cancelAnimationFrame(raf); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ---------------- dual dialogue toggle (Cmd/Ctrl+D) ---------------- */
   const toggleDual = useCallback(() => {
@@ -359,7 +384,6 @@ const ScriptEditor = forwardRef(function ScriptEditor(
 
     setCaret(nb, "start");
     sync(true);
-    if (nextType === "character") setTimeout(() => openMenuFor(nb), 0);
   };
 
   /* ---------------- input / paste / click ---------------- */

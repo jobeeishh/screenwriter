@@ -11,6 +11,7 @@ import {
   buildFDX, parseFDX, parseScriptText, allCharacters, uid, newBlock,
 } from "./engine.js";
 import { CSS } from "./styles.js";
+import { GOOGLE_CLIENT_ID } from "./config.js";
 
 /* ---------------- storage (guarded) ---------------- */
 const storage = (() => {
@@ -36,10 +37,6 @@ const LIB_KEY = "screenwriter-library-v1";
 const CLOUD_KEY = "screenwriter-cloud-v1";
 const OLD_KEY = "screenwriter-doc-v1";
 const docKey = (id) => `screenwriter-doc-v1:${id}`;
-
-/* Paste your Google client ID here and no device will ever ask for it again.
-   Get it at console.cloud.google.com under Credentials. */
-const DEFAULT_GOOGLE_CLIENT_ID = "";
 
 const loadLibrary = () => {
   try { const l = JSON.parse(storage.api.getItem(LIB_KEY) || "[]"); return Array.isArray(l) ? l : []; }
@@ -639,7 +636,7 @@ export default function Screenwriter() {
   };
 
   const connectDrive = async (silent = false) => {
-    const clientId = (DEFAULT_GOOGLE_CLIENT_ID || clientIdDraft || cloud.clientId || "").trim();
+    const clientId = (GOOGLE_CLIENT_ID || clientIdDraft || cloud.clientId || "").trim();
     if (!clientId) { if (!silent) setCloudError("Add your Google client ID first."); return; }
     if (!silent) setCloudError("");
     silentRef.current = silent;
@@ -700,7 +697,7 @@ export default function Screenwriter() {
 
   useEffect(() => {
     if (!cloud.connected) return;
-    if (!(DEFAULT_GOOGLE_CLIENT_ID || cloud.clientId)) return;
+    if (!(GOOGLE_CLIENT_ID || cloud.clientId)) return;
     const t = setTimeout(() => connectDrive(true), 900);
     return () => { clearTimeout(t); if (refreshRef.current) clearTimeout(refreshRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -803,15 +800,15 @@ export default function Screenwriter() {
                 {!cloud.connected && (
                   <>
                     <div className="pop-title">Connect Google Drive</div>
-                    {!DEFAULT_GOOGLE_CLIENT_ID && (
+                    {!GOOGLE_CLIENT_ID && (
                       <>
                         <label className="pop-label">Google client ID</label>
                         <input className="pop-input" placeholder="xxxx.apps.googleusercontent.com" value={clientIdDraft} onChange={(e) => setClientIdDraft(e.target.value)} spellCheck={false} />
                       </>
                     )}
                     {cloudError && <div className="pop-error">{cloudError}</div>}
-                    <button className="pop-btn" onClick={() => connectDrive(false)} disabled={cloudStatus === "syncing" || (!DEFAULT_GOOGLE_CLIENT_ID && !clientIdDraft.trim())}>
-                      {cloudStatus === "syncing" ? "Connecting..." : "Connect Google Drive"}
+                    <button className="pop-btn" onClick={() => connectDrive(false)} disabled={cloudStatus === "syncing" || (!GOOGLE_CLIENT_ID && !clientIdDraft.trim())}>
+                      {cloudStatus === "syncing" ? "Connecting..." : "Sign in with Google"}
                     </button>
                     <div className="pop-hint">Saves to a "Screenwriter" folder in your own Drive. Nobody else can see it.</div>
                   </>
@@ -877,6 +874,7 @@ export default function Screenwriter() {
                 <button className="menu-item" onClick={() => { setMenuOpen(false); fileRef.current.click(); }}><Upload size={14} /> Import script or backup</button>
                 <button className="menu-item" onClick={() => { setMenuOpen(false); exportJSON(); }}><FileJson size={14} /> Download backup (.json)</button>
                 <button className="menu-item" onClick={() => { setMenuOpen(false); setTimeout(() => window.print(), 150); }}><Printer size={14} /> Print / save as PDF</button>
+                <div className="pop-hint" style={{ marginTop: 0 }}>In the print dialog, untick "Headers and footers" once — your browser remembers it.</div>
                 <button className="menu-item" onClick={() => setNight((v) => { try { storage.api.setItem("screenwriter-night", v ? "0" : "1"); } catch {} return !v; })}>
                   {night ? <Sun size={14} /> : <Moon size={14} />} {night ? "Light mode" : "Night mode"}
                 </button>

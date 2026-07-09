@@ -310,17 +310,22 @@ export const CSS = `
   .editor-scroll { overflow: visible; }
   .page {
     box-shadow: none; border-radius: 0; width: 100%; margin: 0;
-    padding: 1in 1in 1in 1.5in !important; min-height: 0;
-    background: #fff; color: #000;
+    /* margins come from @page so that EVERY page gets them, not just the first */
+    padding: 0 !important;
+    min-height: 0; background: #fff; color: #000;
   }
   .blk.heading::before { display: none; }
-  .print-title-page { display: flex !important; flex-direction: column; height: 8.6in; page-break-after: always; font-family: 'Courier Prime', monospace; color: #000; }
+  .blk { orphans: 2; widows: 2; }
+  .blk.heading, .blk.character { break-after: avoid; page-break-after: avoid; }
+  .blk.character + .blk.dialogue { break-before: avoid; page-break-before: avoid; }
+  .dual { break-inside: avoid; page-break-inside: avoid; }
+  .print-title-page { display: flex !important; flex-direction: column; height: 8.4in; page-break-after: always; font-family: 'Courier Prime', monospace; color: #000; }
   .ptp-center { margin: auto; text-align: center; }
   .ptp-title { font-size: 15px; font-weight: 700; letter-spacing: .05em; }
   .ptp-by { margin-top: 28px; font-size: 14px; }
   .ptp-byline { margin-top: 10px; font-size: 14px; }
   .ptp-contact { font-size: 12px; white-space: pre-line; }
-  @page { margin: 0; size: letter; }
+  @page { size: letter; margin: 1in 1in 1in 1.5in; }
 }
 
 /* ---- responsive ---- */
