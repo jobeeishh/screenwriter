@@ -1036,7 +1036,9 @@ export default function Screenwriter() {
             </div>
             <div ref={treatmentRef} className="treatment-editor" contentEditable suppressContentEditableWarning
               data-placeholder="Paste or write your treatment here."
-              onInput={(e) => setDoc((d) => ({ ...d, treatment: e.currentTarget.innerHTML }))} spellCheck />
+              /* read the DOM now: React nulls currentTarget before a deferred
+                 updater runs, and this one defers whenever an update is pending */
+              onInput={(e) => { const html = e.currentTarget.innerHTML; setDoc((d) => ({ ...d, treatment: html })); }} spellCheck />
           </aside>
         )}
 
