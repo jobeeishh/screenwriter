@@ -75,6 +75,32 @@ const setType = (blk, type) => {
 
 const isInDual = (blk) => blk.parentNode && blk.parentNode.classList.contains("dual-col");
 
+/* ------------------------------------------------- mobile element bar ----- */
+/* iOS has no Tab key, so the type cycle that `Tab` drives on desktop is
+   unreachable by touch. The bar makes the same TYPE_CYCLE tappable. */
+const BAR_TYPES = [
+  ["heading", "Scene"],
+  ["action", "Action"],
+  ["character", "Character"],
+  ["dialogue", "Dialogue"],
+  ["parenthetical", "Paren"],
+  ["transition", "Transition"],
+];
+
+const isCoarse = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(pointer: coarse)").matches;
+
+const scrollParent = (node) => {
+  let n = node;
+  while (n && n !== document.body) {
+    if (n.classList && n.classList.contains("editor-scroll")) return n;
+    n = n.parentNode;
+  }
+  return null;
+};
+
 /* =========================================================================== */
 const ScriptEditor = forwardRef(function ScriptEditor(
   { blocks, version, onChange, onCaretBlock, night },
@@ -86,6 +112,16 @@ const ScriptEditor = forwardRef(function ScriptEditor(
   blocksRef.current = blocks;
   const syncTimer = useRef(null);
   const restoreRef = useRef(null); // { id, offset } to restore after a version bump
+
+  /* mobile bar: the caret's type, where the keyboard ends, whether we're editing */
+  const [coarse] = useState(isCoarse);
+  const [caretType, setCaretType] = useState(null);
+  const [kbTop, setKbTop] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const lastBlkIdRef = useRef(null);
+  const barRef = useRef(null);
+  const caretCbRef = useRef(onCaretBlock);
+  caretCbRef.current = onCaretBlock;
 
   /* ---------------- write DOM (only on version change) ---------------- */
   useEffect(() => {
@@ -242,6 +278,11 @@ const ScriptEditor = forwardRef(function ScriptEditor(
         if (!sel || !sel.rangeCount || !sel.isCollapsed) { closeMenu(); return; }
         if (!root.contains(sel.anchorNode)) return;
         const blk = blockOf(sel.anchorNode, root);
+        if (blk) {
+          lastBlkIdRef.current = blk.dataset.id;
+          setCaretType(blk.dataset.type);
+          if (caretCbRef.current) caretCbRef.current(blk.dataset.id, blk.dataset.type);
+        }
         if (blk && blk.dataset.type === "character") openMenuFor(blk);
         else closeMenu();
       });
@@ -250,6 +291,55 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     return () => { document.removeEventListener("selectionchange", onSelChange); if (raf) cancelAnimationFrame(raf); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* ---------------- mobile element bar ---------------- */
+  /* The visual viewport shrinks to the space above the software keyboard, so
+     its bottom edge is where the bar has to sit. */
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!coarse || !vv) return;
+    const measure = () => setKbTop(Math.max(0, window.innerHeight - vv.height - vv.offsetTop));
+    vv.addEventListener("resize", measure);
+    vv.addEventListener("scroll", measure);
+    measure();
+    return () => { vv.removeEventListener("resize", measure); vv.removeEventListener("scroll", measure); };
+  }, [coarse]);
+
+  /* Safari scrolls the caret clear of the keyboard but knows nothing of the bar. */
+  const barVisible = coarse && editing;
+  useEffect(() => {
+    if (!barVisible) return;
+    const t = setTimeout(() => {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const scroller = scrollParent(rootRef.current);
+      if (!scroller) return;
+      const caret = sel.getRangeAt(0).getBoundingClientRect();
+      if (!caret.height && !caret.top) return; // collapsed range in an empty block
+      const barH = barRef.current ? barRef.current.offsetHeight : 44;
+      const floor = (window.visualViewport ? window.visualViewport.height : window.innerHeight) - barH - 12;
+      if (caret.bottom > floor) scroller.scrollTop += caret.bottom - floor;
+    }, 60);
+    return () => clearTimeout(t);
+  }, [barVisible, caretType, kbTop, menu]);
+
+  /* Tapping the bar must not blur the editor. Preventing mousedown's default
+     suppresses the focus change on both desktop and iOS, so the caret stays put
+     and applyType still has a block to act on. */
+  const applyType = (type) => {
+    const root = rootRef.current;
+    if (!root) return;
+    const blk =
+      currentBlock(root) ||
+      (lastBlkIdRef.current && root.querySelector(`[data-id="${lastBlkIdRef.current}"]`));
+    if (!blk) return;
+    setType(blk, type);
+    setCaretType(type);
+    if (!currentBlock(root)) setCaret(blk, "end");
+    if (type === "character") openMenuFor(blk);
+    else closeMenu();
+    sync(true);
+  };
 
   /* ---------------- dual dialogue toggle (Cmd/Ctrl+D) ---------------- */
   const toggleDual = useCallback(() => {
@@ -427,7 +517,7 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     if (!blk || blk.dataset.type !== "character") closeMenu();
   };
 
-  const onBlur = () => setTimeout(closeMenu, 150);
+  const onBlur = () => setTimeout(() => { closeMenu(); setEditing(false); }, 150);
 
   return (
     <div className="editor-host">
@@ -441,6 +531,7 @@ const ScriptEditor = forwardRef(function ScriptEditor(
         onInput={onInput}
         onPaste={onPaste}
         onMouseUp={onMouseUp}
+        onFocus={() => setEditing(true)}
         onBlur={onBlur}
       />
       {menu && (
@@ -454,6 +545,37 @@ const ScriptEditor = forwardRef(function ScriptEditor(
               {it}
             </div>
           ))}
+        </div>
+      )}
+
+      {barVisible && (
+        <div className={`mbar${night ? " night" : ""}`} ref={barRef} style={{ bottom: kbTop }}>
+          {menu && (
+            <div className="mbar-row mbar-sugg">
+              {menu.items.map((it) => (
+                <button
+                  key={it}
+                  type="button"
+                  className="mbar-chip"
+                  onMouseDown={(e) => { e.preventDefault(); acceptMenu(it); }}
+                >
+                  {it}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="mbar-row mbar-types">
+            {BAR_TYPES.map(([type, label]) => (
+              <button
+                key={type}
+                type="button"
+                className={`mbar-btn${caretType === type ? " on" : ""}`}
+                onMouseDown={(e) => { e.preventDefault(); applyType(type); }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>

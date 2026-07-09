@@ -328,6 +328,35 @@ export const CSS = `
   @page { size: letter; margin: 1in 1in 1in 1.5in; }
 }
 
+/* ---- mobile element bar ---- */
+.mbar {
+  position: fixed; left: 0; right: 0; z-index: 20;
+  background: var(--panel); border-top: 1px solid var(--line);
+  box-shadow: 0 -4px 16px rgba(20,20,15,.10);
+}
+.mbar.night { box-shadow: 0 -4px 16px rgba(0,0,0,.4); }
+.mbar-row { display: flex; gap: 6px; overflow-x: auto; padding: 6px 8px; scrollbar-width: none; }
+.mbar-row::-webkit-scrollbar { display: none; }
+.mbar-sugg { border-bottom: 1px solid var(--line); }
+.mbar-btn, .mbar-chip {
+  flex: 0 0 auto; border-radius: 6px; padding: 8px 12px; font-size: 13px; font-weight: 600;
+  border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+  white-space: nowrap; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.mbar-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mbar-chip { font-family: 'Courier Prime', monospace; letter-spacing: .04em; }
+
+/* On touch the bar owns the suggestions; the caret-anchored menu would sit
+   under the keyboard anyway. */
+@media (pointer: coarse) {
+  .ac-menu { display: none; }
+  /* every shortcut it names needs a physical keyboard */
+  .hint-bar { display: none; }
+  /* iOS zooms any focused editable whose text is under 16px. Keep the probe in
+     step so the page estimate still measures what is actually rendered. */
+  .page, .line-probe { font-size: 16px; }
+}
+
 /* ---- responsive ---- */
 @media (max-width: 900px) {
   .page { padding: 40px 28px 80px 40px; width: calc(100% - 24px); }
