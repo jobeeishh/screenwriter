@@ -21,7 +21,7 @@
    Committing it is fine.
    ==========================================================================*/
 
-const PASTE_YOUR_CLIENT_ID_HERE = "";
+const PASTE_YOUR_CLIENT_ID_HERE = "293246585026-4inu0qhc3bcihc9hgv0ot5ik72eo45jh.apps.googleusercontent.com";
 
 export const GOOGLE_CLIENT_ID =
   (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_GOOGLE_CLIENT_ID) ||
