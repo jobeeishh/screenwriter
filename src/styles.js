@@ -344,6 +344,7 @@ export const CSS = `
   white-space: nowrap; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
 }
 .mbar-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mbar-dual { margin-left: 6px; border-left-width: 3px; border-left-color: var(--faint); }
 .mbar-chip { font-family: 'Courier Prime', monospace; letter-spacing: .04em; }
 
 /* On touch the bar owns the suggestions; the caret-anchored menu would sit

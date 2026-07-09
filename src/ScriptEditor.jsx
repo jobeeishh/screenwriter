@@ -116,6 +116,7 @@ const ScriptEditor = forwardRef(function ScriptEditor(
   /* mobile bar: the caret's type, where the keyboard ends, whether we're editing */
   const [coarse] = useState(isCoarse);
   const [caretType, setCaretType] = useState(null);
+  const [caretDual, setCaretDual] = useState(false);
   const [kbTop, setKbTop] = useState(0);
   const [editing, setEditing] = useState(false);
   const lastBlkIdRef = useRef(null);
@@ -281,6 +282,7 @@ const ScriptEditor = forwardRef(function ScriptEditor(
         if (blk) {
           lastBlkIdRef.current = blk.dataset.id;
           setCaretType(blk.dataset.type);
+          setCaretDual(isInDual(blk));
           if (caretCbRef.current) caretCbRef.current(blk.dataset.id, blk.dataset.type);
         }
         if (blk && blk.dataset.type === "character") openMenuFor(blk);
@@ -575,6 +577,14 @@ const ScriptEditor = forwardRef(function ScriptEditor(
                 {label}
               </button>
             ))}
+            <button
+              type="button"
+              className={`mbar-btn mbar-dual${caretDual ? " on" : ""}`}
+              title="Dual dialogue"
+              onMouseDown={(e) => { e.preventDefault(); toggleDual(); }}
+            >
+              Dual
+            </button>
           </div>
         </div>
       )}
