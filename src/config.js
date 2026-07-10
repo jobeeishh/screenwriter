@@ -27,3 +27,12 @@ export const GOOGLE_CLIENT_ID =
   (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_GOOGLE_CLIENT_ID) ||
   PASTE_YOUR_CLIENT_ID_HERE ||
   "";
+
+/* The live-session relay (collab/ worker). wss:// URL of the deployed
+   screenwriter-collab worker; empty disables the Live button. */
+const COLLAB_WORKER_URL = "wss://screenwriter-collab.josephpyao.workers.dev";
+
+export const COLLAB_URL =
+  (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_COLLAB_URL) ||
+  COLLAB_WORKER_URL ||
+  "";

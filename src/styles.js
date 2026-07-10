@@ -328,6 +328,29 @@ export const CSS = `
   @page { size: letter; margin: 1in 1in 1in 1.5in; }
 }
 
+/* ---- live session ---- */
+.collab-chip {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 10px; letter-spacing: .06em; color: var(--faint);
+  max-width: 170px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.collab-chip.on svg { color: #3E7A52; }
+.collab-chip.connecting svg { color: #C46A2B; }
+.collab-banner {
+  position: sticky; top: 10px; z-index: 6;
+  display: flex; align-items: center; gap: 10px;
+  width: min(600px, calc(100% - 48px)); margin: 10px auto -14px;
+  padding: 8px 12px; font-size: 12px;
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(20,20,15,.14);
+}
+.collab-banner span { flex: 1; min-width: 0; }
+.collab-banner button {
+  flex: 0 0 auto; border: none; border-radius: 6px; padding: 5px 10px;
+  font-size: 11px; font-weight: 600; background: var(--accent); color: #fff;
+}
+.collab-banner button.dismiss { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+
 /* ---- mobile element bar ---- */
 .mbar {
   position: fixed; left: 0; right: 0; z-index: 20;
@@ -378,7 +401,7 @@ export const CSS = `
   .tb-right { flex: 0 0 auto; margin-left: auto; }
   .theme-strip { order: 3; width: 100%; }
   .title-input { flex: 1; width: auto; min-width: 40px; font-size: 11px; }
-  .save-word, .streak-chip, .page-est, .sync-warn { display: none; }
+  .save-word, .streak-chip, .page-est, .sync-warn, .collab-chip { display: none; }
   .icon-btn { width: 28px; height: 28px; }
   .export-btn { padding: 5px 9px; font-size: 11px; }
   .pop-panel { position: fixed; left: 10px; right: 10px; top: var(--topbar-h); width: auto; }

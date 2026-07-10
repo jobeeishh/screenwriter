@@ -3,7 +3,7 @@ import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload, Clapperboard,
   Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText, History,
   RotateCcw, SeparatorHorizontal, Bold, List, Maximize2, CheckCircle2,
-  MoreHorizontal, Moon, Sun, Printer, Timer, Flame,
+  MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi,
 } from "lucide-react";
 import ScriptEditor from "./ScriptEditor.jsx";
 import {
@@ -12,7 +12,7 @@ import {
 } from "./engine.js";
 import { planSync, PROJECT_FILE_RE, projectFileName, fountainFileName } from "./sync.js";
 import { CSS } from "./styles.js";
-import { GOOGLE_CLIENT_ID } from "./config.js";
+import { GOOGLE_CLIENT_ID, COLLAB_URL } from "./config.js";
 
 /* ---------------- storage (guarded) ---------------- */
 const storage = (() => {
@@ -36,6 +36,8 @@ const storage = (() => {
 
 const LIB_KEY = "screenwriter-library-v1";
 const CLOUD_KEY = "screenwriter-cloud-v1";
+const COLLAB_KEY = "screenwriter-collab-v1";
+const COLLAB_NAME_KEY = "screenwriter-collab-name";
 const OLD_KEY = "screenwriter-doc-v1";
 const docKey = (id) => `screenwriter-doc-v1:${id}`;
 
@@ -887,6 +889,168 @@ export default function Screenwriter() {
 
   const notSynced = cloud.connected && (!sessionEmail || cloudStatus === "error");
 
+  /* ---------------- live session (presence + handoff) ----------------
+     Opt-in per script. One WebSocket room per script id (collab/ worker);
+     the relay stores nothing. Saved copies fan out to peers: an idle peer
+     applies them live; a peer mid-typing gets a banner instead, so a remote
+     copy never lands under someone's caret. If the local copy diverged from
+     the last state both sides shared, it is stashed in the Versions panel
+     before the remote copy is applied -- same no-data-loss rule as sync. */
+  const [collabMap, setCollabMap] = useState(() => {
+    try { return JSON.parse(storage.api.getItem(COLLAB_KEY) || "{}"); } catch { return {}; }
+  });
+  const collabEnabled = !!collabMap[currentId] && !!COLLAB_URL;
+  const [peers, setPeers] = useState([]);
+  const [peerTyping, setPeerTyping] = useState("");
+  const [collabState, setCollabState] = useState("off"); // off | connecting | on
+  const [remotePending, setRemotePending] = useState(null); // { from, core }
+  const collabWS = useRef(null);
+  const remoteApplyRef = useRef(false);
+  const lastKnownCoreRef = useRef(""); // last core both sides agreed on
+  const lastEditAtRef = useRef(0);
+  const typingSentAtRef = useRef(0);
+  const typingClearRef = useRef(null);
+  const sendTimerRef = useRef(null);
+  const reconnectRef = useRef(null);
+
+  const coreOf = (d) => ({
+    title: d.title, theme: d.theme, treatment: d.treatment || "",
+    titlePage: d.titlePage, characters: d.characters, blocks: d.blocks,
+  });
+  const coreKey = (c) => JSON.stringify({ t: c.title, h: c.theme, r: c.treatment || "", p: c.titlePage, c: c.characters, b: c.blocks });
+
+  const sendWS = (obj) => {
+    const ws = collabWS.current;
+    if (!ws || ws.readyState !== 1) return;
+    const s = JSON.stringify(obj);
+    if (s.length > 800000) return; // relay rejects near 1MiB; blocks alone never get close
+    try { ws.send(s); } catch {}
+  };
+
+  /* cheap content hash so a peer can say which state their copy grew from */
+  const hashStr = (s) => {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return String(h);
+  };
+
+  /* lastKnownCore advances only when we APPLY or CONFIRM a peer's state --
+     never on send. Having sent a copy is not agreement: the peer may never
+     incorporate it, and treating it as agreed is how work gets destroyed. */
+  const sendDocNow = () => {
+    const d = stateRef.current.doc;
+    sendWS({ type: "doc", core: coreOf(d), basedOn: hashStr(lastKnownCoreRef.current) });
+  };
+
+  const applyRemote = (core, basedOn) => {
+    const cur = stateRef.current.doc;
+    let next = { ...cur, ...core }; // versions stay local; cores travel
+    /* fast-forward: the incoming copy grew from exactly our current state
+       (normal turn-taking). Anything else overwriting local changes stashes
+       them in the Versions panel first. */
+    const fastForward = basedOn && basedOn === hashStr(docCore(cur));
+    if (!fastForward && docCore(cur) !== lastKnownCoreRef.current) {
+      next = { ...next, versions: [...(cur.versions || []), docVersionOf(cur, `Your copy before live update ${new Date().toLocaleString()}`)] };
+    }
+    remoteApplyRef.current = true;
+    skipSave.current = true;
+    setDoc(next); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
+    persist(stateRef.current.currentId, next);
+    lastKnownCoreRef.current = docCore(next);
+    setRemotePending(null);
+  };
+
+  const onCollabMessage = (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === "roster") { setPeers(m.names || []); return; }
+    if (m.type === "join") { setPeers((p) => [...p, m.name]); sendDocNow(); return; } // newcomer gets our copy
+    if (m.type === "leave") {
+      setPeers((p) => { const i = p.indexOf(m.name); return i < 0 ? p : [...p.slice(0, i), ...p.slice(i + 1)]; });
+      return;
+    }
+    if (m.type === "sync-request") { sendDocNow(); return; }
+    if (m.type === "editing") {
+      setPeerTyping(m.from || "Someone");
+      clearTimeout(typingClearRef.current);
+      typingClearRef.current = setTimeout(() => setPeerTyping(""), 2500);
+      return;
+    }
+    if (m.type === "doc" && m.core) {
+      const incoming = coreKey(m.core);
+      if (incoming === docCore(stateRef.current.doc)) { lastKnownCoreRef.current = incoming; return; }
+      if (Date.now() - lastEditAtRef.current < 3000) setRemotePending({ from: m.from || "Someone", core: m.core, basedOn: m.basedOn });
+      else applyRemote(m.core, m.basedOn);
+    }
+  };
+  const onCollabMessageRef = useRef(onCollabMessage);
+  onCollabMessageRef.current = onCollabMessage;
+
+  useEffect(() => {
+    if (!collabEnabled) {
+      setCollabState("off"); setPeers([]); setPeerTyping(""); setRemotePending(null);
+      return;
+    }
+    let closed = false;
+    let ws;
+    const connect = () => {
+      if (closed) return;
+      setCollabState("connecting");
+      const name = encodeURIComponent((storage.api.getItem(COLLAB_NAME_KEY) || "Someone").slice(0, 40));
+      const sock = new WebSocket(`${COLLAB_URL}/room/sw-${currentId}?name=${name}`);
+      ws = sock;
+      collabWS.current = sock;
+      sock.onopen = () => {
+        if (collabWS.current !== sock) return; // superseded while connecting
+        setCollabState("on"); lastKnownCoreRef.current = ""; sendWS({ type: "sync-request" });
+      };
+      sock.onmessage = (ev) => { if (collabWS.current === sock) onCollabMessageRef.current(ev); };
+      sock.onclose = () => {
+        /* a stale socket's close must not clobber its replacement: the close
+           event lands async, after a reconnect (or StrictMode remount) has
+           already installed a new socket */
+        if (collabWS.current !== sock) return;
+        collabWS.current = null; setPeers([]);
+        if (!closed) { setCollabState("connecting"); reconnectRef.current = setTimeout(connect, 3000); }
+      };
+    };
+    connect();
+    const ka = setInterval(() => { try { if (ws && ws.readyState === 1) ws.send("ping"); } catch {} }, 30000);
+    return () => {
+      closed = true; clearInterval(ka); clearTimeout(reconnectRef.current);
+      try { if (ws) ws.close(); } catch {}
+      collabWS.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collabEnabled, currentId]);
+
+  /* every local doc change: mark for the idle test, signal typing, and send
+     the saved copy after the keystrokes settle */
+  useEffect(() => {
+    if (remoteApplyRef.current) { remoteApplyRef.current = false; return; }
+    if (!collabWS.current || collabWS.current.readyState !== 1) return;
+    lastEditAtRef.current = Date.now();
+    if (Date.now() - typingSentAtRef.current > 2000) { typingSentAtRef.current = Date.now(); sendWS({ type: "editing" }); }
+    clearTimeout(sendTimerRef.current);
+    sendTimerRef.current = setTimeout(sendDocNow, 800);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc]);
+
+  const toggleCollab = () => {
+    if (!COLLAB_URL) return;
+    if (!collabMap[currentId]) {
+      const name = (window.prompt("Name to show your collaborator:", storage.api.getItem(COLLAB_NAME_KEY) || "") || "").trim();
+      if (!name) return;
+      try { storage.api.setItem(COLLAB_NAME_KEY, name); } catch {}
+    }
+    setCollabMap((m) => {
+      const n = { ...m };
+      if (n[currentId]) delete n[currentId]; else n[currentId] = true;
+      try { storage.api.setItem(COLLAB_KEY, JSON.stringify(n)); } catch {}
+      return n;
+    });
+  };
+
   /* ---------------- board drag ---------------- */
   const doMove = (from, to) => { if (from != null && to != null && from !== to) setBlocks(moveSceneBlocks(doc.blocks, from, to)); };
 
@@ -942,8 +1106,20 @@ export default function Screenwriter() {
               <X size={11} className="pomo-x" onClick={(e) => { e.stopPropagation(); setPomo(null); }} />
             </span>
           )}
+          {collabEnabled && (
+            <span className={`collab-chip ${collabState}`} title={peers.length ? `In session with ${peers.join(", ")}` : "Waiting for your collaborator to join"}>
+              <Circle size={7} fill="currentColor" />
+              {peerTyping ? `${peerTyping} is typing…` : peers.length ? peers.join(", ") : collabState === "on" ? "just you" : "connecting…"}
+            </span>
+          )}
           <input ref={fileRef} type="file" accept=".sws,.json,.fdx,.txt,.fountain" style={{ display: "none" }} onChange={importFile} />
           <button className="export-btn" onClick={exportFDX}><Download size={14} /> FDX</button>
+
+          {COLLAB_URL && (
+            <button className={`icon-btn${collabEnabled ? " on" : ""}`} title={collabEnabled ? "Leave live session" : "Start live session"} onClick={toggleCollab}>
+              <Wifi size={16} />
+            </button>
+          )}
 
           <div className="pop-wrap">
             <button className={`icon-btn${cloudOpen ? " on" : ""}${notSynced ? " warn-badge" : ""}`} title="Cloud sync" onClick={() => { setClientIdDraft(cloud.clientId); setCloudOpen((v) => !v); }}>
@@ -1152,6 +1328,13 @@ export default function Screenwriter() {
         )}
 
         <main className="editor-scroll">
+          {remotePending && (
+            <div className="collab-banner">
+              <span><b>{remotePending.from}</b> made changes while you were typing.</span>
+              <button onClick={() => applyRemote(remotePending.core, remotePending.basedOn)}>Load theirs</button>
+              <button className="dismiss" onClick={() => setRemotePending(null)}>Keep typing</button>
+            </div>
+          )}
           <div className="page" ref={pageRef}>
             {doc.titlePage && (doc.titlePage.byline || doc.titlePage.contact) ? (
               <div className="print-title-page" aria-hidden="true">
