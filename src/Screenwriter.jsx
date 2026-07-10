@@ -376,6 +376,23 @@ export default function Screenwriter() {
     titlePage: doc.titlePage, characters: doc.characters, blocks: doc.blocks,
   }));
 
+  /* Everything except versions[]: two docs with equal cores differ only in
+     saved-version history, which merges by id instead of conflicting. Used by
+     both Drive sync and .sws import to keep the losing copy recoverable. */
+  const docCore = (x) => JSON.stringify({
+    t: x.title, h: x.theme, r: x.treatment || "", p: x.titlePage, c: x.characters, b: x.blocks,
+  });
+  const mergeVersions = (a, b) => {
+    const seen = new Set((a || []).map((v) => v.id));
+    return [...(a || []), ...(b || []).filter((v) => !seen.has(v.id))];
+  };
+  const docVersionOf = (d, vname) => ({
+    id: uid(), name: vname, createdAt: Date.now(),
+    title: d.title || "UNTITLED", theme: d.theme || "", treatment: d.treatment || "",
+    titlePage: d.titlePage || { byline: "", contact: "" },
+    characters: d.characters || {}, blocks: d.blocks || [],
+  });
+
   const saveVersion = () => {
     const name = window.prompt("Name this version:", `Draft ${(doc.versions || []).length + 1}`);
     if (!name) return;
@@ -459,7 +476,15 @@ export default function Screenwriter() {
 
   /* ---------------- import / export ---------------- */
   const exportFDX = () => downloadBlob(`${safeName(doc.title)}.fdx`, buildFDX(doc), "application/xml");
-  const exportJSON = () => downloadBlob(`${safeName(doc.title)}-backup.json`, JSON.stringify(doc, null, 2), "application/json");
+  /* .sws: the app's own interchange file. JSON envelope carrying the project
+     id, so a copy that comes back from a collaborator lands on the same
+     project and merges instead of duplicating. Lossless, unlike FDX/fountain,
+     which cannot hold the treatment, character notes, or version history. */
+  const exportSWS = () => downloadBlob(
+    `${safeName(doc.title)}.sws`,
+    JSON.stringify({ format: "screenwriter-script", version: 1, id: currentId, exportedAt: Date.now(), doc }, null, 2),
+    "application/json"
+  );
 
   const openImported = (title, blocks) => {
     persist(currentId, doc);
@@ -471,6 +496,35 @@ export default function Screenwriter() {
     setCurrentId(id); setDoc(nd); setVersion((v) => v + 1);
   };
 
+  /* .sws with a known id: the incoming copy becomes live; if the local copy
+     differs it is stashed in the Versions panel first, so an exchange can
+     never destroy work on either end. Plain .json backups (no envelope)
+     import as a new project -- they used to overwrite the open script. */
+  const importDoc = (raw) => {
+    const isEnvelope = raw && raw.format === "screenwriter-script" && raw.doc;
+    const incoming = migrateDoc(isEnvelope ? raw.doc : raw);
+    const pid = (isEnvelope && raw.id) || uid();
+    const existing = pid === currentId ? doc : loadProjectDoc(pid);
+    let next = incoming;
+    if (existing) {
+      const merged = mergeVersions(existing.versions, incoming.versions);
+      next = docCore(existing) === docCore(incoming)
+        ? { ...incoming, versions: merged }
+        : { ...incoming, versions: [...merged, docVersionOf(existing, `Your copy before import ${new Date().toLocaleString()}`)] };
+    }
+    persist(currentId, doc);
+    saveProjectDoc(pid, next);
+    setLibrary((lib) => {
+      const entry = { id: pid, title: next.title || "UNTITLED", updatedAt: Date.now() };
+      const i = lib.findIndex((p) => p.id === pid);
+      const n = i >= 0 ? lib.map((p, j) => (j === i ? entry : p)) : [entry, ...lib];
+      saveLibrary(n);
+      return n;
+    });
+    skipSave.current = true;
+    setCurrentId(pid); setDoc(next); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
+  };
+
   const importFile = (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -478,9 +532,8 @@ export default function Screenwriter() {
     const r = new FileReader();
     r.onload = () => {
       try {
-        if (name.endsWith(".json")) {
-          const d = migrateDoc(JSON.parse(r.result));
-          setDoc(d); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
+        if (name.endsWith(".sws") || name.endsWith(".json")) {
+          importDoc(JSON.parse(r.result));
           return;
         }
         const fallback = f.name.replace(/\.[^.]+$/, "").toUpperCase();
@@ -654,22 +707,6 @@ export default function Screenwriter() {
     return { fileId: j.id, fountainId, modifiedTime: j.modifiedTime, syncedAt: Date.now() };
   };
 
-  /* everything except versions[]; two docs with equal cores differ only in
-     saved-version history, which merges by id instead of conflicting */
-  const docCore = (x) => JSON.stringify({
-    t: x.title, h: x.theme, r: x.treatment || "", p: x.titlePage, c: x.characters, b: x.blocks,
-  });
-  const mergeVersions = (a, b) => {
-    const seen = new Set((a || []).map((v) => v.id));
-    return [...(a || []), ...(b || []).filter((v) => !seen.has(v.id))];
-  };
-  const conflictVersion = (remoteDoc) => ({
-    id: uid(), name: `Cloud copy (conflict) ${new Date().toLocaleString()}`, createdAt: Date.now(),
-    title: remoteDoc.title || "UNTITLED", theme: remoteDoc.theme || "", treatment: remoteDoc.treatment || "",
-    titlePage: remoteDoc.titlePage || { byline: "", contact: "" },
-    characters: remoteDoc.characters || {}, blocks: remoteDoc.blocks || [],
-  });
-
   /* -- the one reconciliation routine: connect, the 60s tick, and "Sync now"
         all land here. planSync (src/sync.js, tested in node) decides; this
         executes. Conflicts keep the local copy live and stash the cloud copy
@@ -738,7 +775,7 @@ export default function Screenwriter() {
           const merged = mergeVersions(local.versions, remoteDoc.versions);
           const next = docCore(remoteDoc) === docCore(local)
             ? (merged.length !== (local.versions || []).length ? { ...local, versions: merged } : local)
-            : { ...local, versions: [...merged, conflictVersion(remoteDoc)] };
+            : { ...local, versions: [...merged, docVersionOf(remoteDoc, `Cloud copy (conflict) ${new Date().toLocaleString()}`)] };
           saveProjectDoc(a.id, next);
           if (a.id === stateRef.current.currentId && next !== local) {
             skipSave.current = true;
@@ -905,7 +942,7 @@ export default function Screenwriter() {
               <X size={11} className="pomo-x" onClick={(e) => { e.stopPropagation(); setPomo(null); }} />
             </span>
           )}
-          <input ref={fileRef} type="file" accept=".json,.fdx,.txt,.fountain" style={{ display: "none" }} onChange={importFile} />
+          <input ref={fileRef} type="file" accept=".sws,.json,.fdx,.txt,.fountain" style={{ display: "none" }} onChange={importFile} />
           <button className="export-btn" onClick={exportFDX}><Download size={14} /> FDX</button>
 
           <div className="pop-wrap">
@@ -988,8 +1025,8 @@ export default function Screenwriter() {
             <button className={`icon-btn${menuOpen ? " on" : ""}`} title="More" onClick={() => setMenuOpen((v) => !v)}><MoreHorizontal size={16} /></button>
             {menuOpen && (
               <div className="pop-panel">
-                <button className="menu-item" onClick={() => { setMenuOpen(false); fileRef.current.click(); }}><Upload size={14} /> Import script or backup</button>
-                <button className="menu-item" onClick={() => { setMenuOpen(false); exportJSON(); }}><FileJson size={14} /> Download backup (.json)</button>
+                <button className="menu-item" onClick={() => { setMenuOpen(false); fileRef.current.click(); }}><Upload size={14} /> Import script (.sws, .fdx, .fountain...)</button>
+                <button className="menu-item" onClick={() => { setMenuOpen(false); exportSWS(); }}><FileJson size={14} /> Download script (.sws)</button>
                 <button className="menu-item" onClick={() => { setMenuOpen(false); downloadBlob(`${safeName(doc.title)}.fountain`, buildFountain(doc), "text/plain"); }}><FileText size={14} /> Download .fountain</button>
                 <button className="menu-item" onClick={() => { setMenuOpen(false); setTimeout(() => window.print(), 150); }}><Printer size={14} /> Print / save as PDF</button>
                 <div className="pop-hint" style={{ marginTop: 0 }}>In the print dialog, untick "Headers and footers" once — your browser remembers it.</div>
