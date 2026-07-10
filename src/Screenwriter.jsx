@@ -10,7 +10,7 @@ import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
 } from "./engine.js";
-import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, swsEnvelope } from "./sync.js";
+import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope } from "./sync.js";
 import { CSS } from "./styles.js";
 import { GOOGLE_CLIENT_ID, COLLAB_URL } from "./config.js";
 
@@ -606,14 +606,14 @@ export default function Screenwriter() {
      screenwriter-sync.json -- dropped here; the legacy file is detected by
      name and imported once. */
   const [cloud, setCloud] = useState(() => {
-    const empty = { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, files: {}, tombstones: [] };
+    const empty = { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, backupFolderId: null, files: {}, tombstones: [] };
     try {
       const c = JSON.parse(storage.api.getItem(CLOUD_KEY) || "null");
       return c && typeof c === "object"
         ? {
             ...empty,
             clientId: c.clientId || "", connected: !!c.connected, lastSyncedAt: c.lastSyncedAt || null,
-            email: c.email || "", folderId: c.folderId || null,
+            email: c.email || "", folderId: c.folderId || null, backupFolderId: c.backupFolderId || null,
             files: c.files && typeof c.files === "object" ? c.files : {},
             tombstones: Array.isArray(c.tombstones) ? c.tombstones : [],
           }
@@ -706,12 +706,37 @@ export default function Screenwriter() {
     catch (e) { if (!/404/.test(String(e && e.message))) throw e; }
   };
 
+  /* the readable insurance copies live one level down, out of the way of the
+     .sws files. Find-or-create, cached in cloud state. */
+  const ensureBackupFolder = async (folderId) => {
+    const cached = cloudRef.current.backupFolderId;
+    if (cached) return cached;
+    const q = encodeURIComponent(`name='Fountain Backups' and '${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)`);
+    const d = await r.json();
+    let id = d.files && d.files[0] && d.files[0].id;
+    if (!id) {
+      const c = await driveFetch("https://www.googleapis.com/drive/v3/files", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Fountain Backups", mimeType: "application/vnd.google-apps.folder", parents: [folderId] }),
+      });
+      id = (await c.json()).id;
+    }
+    persistCloud({ ...cloudRef.current, backupFolderId: id });
+    return id;
+  };
+
   const uploadProject = async (folderId, id, d, prev) => {
     /* the PATCH carries the name, so a legacy sw-<id>.json becomes a
        title-named .sws in place on its first push after this build */
     const j = await upsertRemote(folderId, prev && prev.fileId, swsFileName(d.title, id), JSON.stringify(swsEnvelope(id, d)), "application/json");
-    if (prev && prev.fountainId) { try { await deleteRemote(prev.fountainId); } catch {} } // fountains no longer sync
-    return { fileId: j.id, modifiedTime: j.modifiedTime, syncedAt: Date.now() };
+    let fountainId = (prev && prev.fountainId) || null;
+    try {
+      const bf = await ensureBackupFolder(folderId);
+      const fj = await upsertRemote(bf, fountainId, fountainFileName(d.title, id), buildFountain(d), "text/plain");
+      fountainId = fj.id;
+    } catch {} // the backup is best-effort; its failure must not fail the sync
+    return { fileId: j.id, fountainId, modifiedTime: j.modifiedTime, syncedAt: Date.now() };
   };
 
   /* -- the one reconciliation routine: connect, the 60s tick, and "Sync now"
@@ -755,8 +780,10 @@ export default function Screenwriter() {
         }
       }
 
-      /* fountains no longer sync: clear out the ones older builds wrote.
-         Only names carrying one of our project ids are touched. */
+      /* fountains live in the Fountain Backups subfolder now; this listing
+         only covers the main folder, so anything here is a leftover from an
+         older build -- delete it and let the next push recreate it in the
+         subfolder. Only names carrying one of our project ids are touched. */
       for (const [fid, fileId] of Object.entries(fountains)) {
         if (lib.some((p) => p.id === fid) || files[fid]) {
           try { await deleteRemote(fileId); } catch {}
@@ -778,7 +805,7 @@ export default function Screenwriter() {
           const le = { id: a.id, title: md.title || "UNTITLED", updatedAt: Date.now() };
           const i = lib.findIndex((p) => p.id === a.id);
           if (i >= 0) lib[i] = le; else lib.push(le);
-          files[a.id] = { fileId: rem.fileId, modifiedTime: rem.modifiedTime, syncedAt: Date.now() };
+          files[a.id] = { fileId: rem.fileId, fountainId: (files[a.id] || {}).fountainId || null, modifiedTime: rem.modifiedTime, syncedAt: Date.now() };
           if (a.id === stateRef.current.currentId) {
             skipSave.current = true;
             setDoc(md); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);

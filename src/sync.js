@@ -31,6 +31,7 @@ const slug = (title) =>
   (String(title || "untitled").trim() || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "untitled";
 
 export const swsFileName = (title, id) => `${slug(title)}-${id}.sws`;
+export const fountainFileName = (title, id) => `${slug(title)}-${id}.fountain`;
 
 export const swsEnvelope = (id, doc) => ({
   format: "screenwriter-script", version: 1, id,
