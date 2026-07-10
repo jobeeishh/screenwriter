@@ -19,10 +19,23 @@
    clock skew cannot corrupt the decision.
    ==========================================================================*/
 
-export const PROJECT_FILE_RE = /^sw-([a-z0-9]+)\.json$/;
-export const projectFileName = (id) => `sw-${id}.json`;
-export const fountainFileName = (title, id) =>
-  `${(String(title || "untitled").trim() || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "untitled"}-${id}.fountain`;
+/* One format everywhere: a script IS a title-named .sws file, in Drive and in
+   the menu export alike. The legacy patterns are still recognized so folders
+   written by older builds keep syncing; on their next push the same Drive
+   file is renamed in place (the id, not the name, is a file's identity). */
+export const SWS_FILE_RE = /-([a-z0-9]+)\.sws$/;
+export const LEGACY_JSON_RE = /^sw-([a-z0-9]+)\.json$/;
+export const FOUNTAIN_FILE_RE = /-([a-z0-9]+)\.fountain$/;
+
+const slug = (title) =>
+  (String(title || "untitled").trim() || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "untitled";
+
+export const swsFileName = (title, id) => `${slug(title)}-${id}.sws`;
+
+export const swsEnvelope = (id, doc) => ({
+  format: "screenwriter-script", version: 1, id,
+  title: doc.title || "UNTITLED", updatedAt: Date.now(), doc,
+});
 
 export function planSync({ library, bases, remote }) {
   const actions = [];

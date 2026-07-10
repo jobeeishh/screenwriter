@@ -10,7 +10,7 @@ import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
 } from "./engine.js";
-import { planSync, PROJECT_FILE_RE, projectFileName, fountainFileName } from "./sync.js";
+import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, swsEnvelope } from "./sync.js";
 import { CSS } from "./styles.js";
 import { GOOGLE_CLIENT_ID, COLLAB_URL } from "./config.js";
 
@@ -484,7 +484,7 @@ export default function Screenwriter() {
      which cannot hold the treatment, character notes, or version history. */
   const exportSWS = () => downloadBlob(
     `${safeName(doc.title)}.sws`,
-    JSON.stringify({ format: "screenwriter-script", version: 1, id: currentId, exportedAt: Date.now(), doc }, null, 2),
+    JSON.stringify(swsEnvelope(currentId, doc), null, 2),
     "application/json"
   );
 
@@ -682,13 +682,18 @@ export default function Screenwriter() {
     const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)&pageSize=1000`);
     const d = await r.json();
     const map = {};
+    const fountains = {};
     let legacyId = null;
     (d.files || []).forEach((f) => {
-      const m = PROJECT_FILE_RE.exec(f.name);
-      if (m) map[m[1]] = { fileId: f.id, modifiedTime: f.modifiedTime };
-      else if (f.name === "screenwriter-sync.json") legacyId = f.id;
+      const sws = SWS_FILE_RE.exec(f.name);
+      const old = sws ? null : LEGACY_JSON_RE.exec(f.name);
+      const m = sws || old;
+      if (m) { map[m[1]] = { fileId: f.id, modifiedTime: f.modifiedTime }; return; }
+      const fn = FOUNTAIN_FILE_RE.exec(f.name);
+      if (fn) { fountains[fn[1]] = f.id; return; }
+      if (f.name === "screenwriter-sync.json") legacyId = f.id;
     });
-    return { map, legacyId };
+    return { map, fountains, legacyId };
   };
 
   const fetchFileJson = async (fileId) => {
@@ -702,14 +707,11 @@ export default function Screenwriter() {
   };
 
   const uploadProject = async (folderId, id, d, prev) => {
-    const payload = JSON.stringify({ id, title: d.title, updatedAt: Date.now(), doc: d });
-    const j = await upsertRemote(folderId, prev && prev.fileId, projectFileName(id), payload, "application/json");
-    let fountainId = (prev && prev.fountainId) || null;
-    try {
-      const fj = await upsertRemote(folderId, fountainId, fountainFileName(d.title, id), buildFountain(d), "text/plain");
-      fountainId = fj.id;
-    } catch {} // the .fountain is a companion artifact; losing it must not fail the sync
-    return { fileId: j.id, fountainId, modifiedTime: j.modifiedTime, syncedAt: Date.now() };
+    /* the PATCH carries the name, so a legacy sw-<id>.json becomes a
+       title-named .sws in place on its first push after this build */
+    const j = await upsertRemote(folderId, prev && prev.fileId, swsFileName(d.title, id), JSON.stringify(swsEnvelope(id, d)), "application/json");
+    if (prev && prev.fountainId) { try { await deleteRemote(prev.fountainId); } catch {} } // fountains no longer sync
+    return { fileId: j.id, modifiedTime: j.modifiedTime, syncedAt: Date.now() };
   };
 
   /* -- the one reconciliation routine: connect, the 60s tick, and "Sync now"
@@ -734,7 +736,7 @@ export default function Screenwriter() {
         } catch { tombstones.push(t); }
       }
 
-      const { map: remote, legacyId } = await listRemote(folderId);
+      const { map: remote, fountains, legacyId } = await listRemote(folderId);
       let lib = stateRef.current.library.slice();
       const docOf = (id) => (id === stateRef.current.currentId ? stateRef.current.doc : loadProjectDoc(id));
 
@@ -753,6 +755,15 @@ export default function Screenwriter() {
         }
       }
 
+      /* fountains no longer sync: clear out the ones older builds wrote.
+         Only names carrying one of our project ids are touched. */
+      for (const [fid, fileId] of Object.entries(fountains)) {
+        if (lib.some((p) => p.id === fid) || files[fid]) {
+          try { await deleteRemote(fileId); } catch {}
+          if (files[fid]) files[fid] = { ...files[fid], fountainId: null };
+        }
+      }
+
       const actions = planSync({ library: lib, bases: files, remote });
       for (const a of actions) {
         const rem = remote[a.id];
@@ -767,7 +778,7 @@ export default function Screenwriter() {
           const le = { id: a.id, title: md.title || "UNTITLED", updatedAt: Date.now() };
           const i = lib.findIndex((p) => p.id === a.id);
           if (i >= 0) lib[i] = le; else lib.push(le);
-          files[a.id] = { fileId: rem.fileId, fountainId: (files[a.id] || {}).fountainId || null, modifiedTime: rem.modifiedTime, syncedAt: Date.now() };
+          files[a.id] = { fileId: rem.fileId, modifiedTime: rem.modifiedTime, syncedAt: Date.now() };
           if (a.id === stateRef.current.currentId) {
             skipSave.current = true;
             setDoc(md); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
