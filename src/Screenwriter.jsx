@@ -503,7 +503,10 @@ export default function Screenwriter() {
      never destroy work on either end. Plain .json backups (no envelope)
      import as a new project -- they used to overwrite the open script. */
   const importDoc = (raw) => {
-    const isEnvelope = raw && raw.format === "screenwriter-script" && raw.doc;
+    /* two id-carrying wrappers exist: the .sws envelope and the sw-<id>.json
+       that sync writes to Drive. Someone will inevitably download the Drive
+       file and send that instead of an .sws -- accept it the same way. */
+    const isEnvelope = raw && (raw.format === "screenwriter-script" || (raw.id && typeof raw.doc === "object")) && raw.doc;
     const incoming = migrateDoc(isEnvelope ? raw.doc : raw);
     const pid = (isEnvelope && raw.id) || uid();
     const existing = pid === currentId ? doc : loadProjectDoc(pid);
