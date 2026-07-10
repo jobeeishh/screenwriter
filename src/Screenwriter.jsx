@@ -8,8 +8,9 @@ import {
 import ScriptEditor from "./ScriptEditor.jsx";
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
-  buildFDX, parseFDX, parseScriptText, allCharacters, uid, newBlock,
+  buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
 } from "./engine.js";
+import { planSync, PROJECT_FILE_RE, projectFileName, fountainFileName } from "./sync.js";
 import { CSS } from "./styles.js";
 import { GOOGLE_CLIENT_ID } from "./config.js";
 
@@ -445,6 +446,15 @@ export default function Screenwriter() {
       skipSave.current = true;
       setCurrentId(rest[0].id); setDoc(next); setVersion((v) => v + 1);
     }
+    /* tombstone: the remote files get deleted on the next sync pass;
+       without this the project would come back from Drive */
+    const cfg = cloudRef.current;
+    const f = (cfg.files || {})[id];
+    if (f) {
+      const files = { ...cfg.files };
+      delete files[id];
+      persistCloud({ ...cfg, files, tombstones: [...(cfg.tombstones || []), { id, fileId: f.fileId, fountainId: f.fountainId }] });
+    }
   };
 
   /* ---------------- import / export ---------------- */
@@ -530,14 +540,27 @@ export default function Screenwriter() {
     return () => clearInterval(t);
   }, [pomo && pomo.running]);
 
-  /* ---------------- Google Drive sync ---------------- */
+  /* ---------------- Google Drive sync ----------------
+     One sw-<id>.json per project (canonical) plus a generated .fountain
+     companion. `files` remembers what we last saw of each remote file;
+     `tombstones` are locally-deleted projects whose remote files still need
+     deleting. Old state carried a single `fileId` for the monolithic
+     screenwriter-sync.json -- dropped here; the legacy file is detected by
+     name and imported once. */
   const [cloud, setCloud] = useState(() => {
+    const empty = { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, files: {}, tombstones: [] };
     try {
       const c = JSON.parse(storage.api.getItem(CLOUD_KEY) || "null");
       return c && typeof c === "object"
-        ? { clientId: c.clientId || "", connected: !!c.connected, lastSyncedAt: c.lastSyncedAt || null, email: c.email || "", folderId: c.folderId || null, fileId: c.fileId || null }
-        : { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, fileId: null };
-    } catch { return { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, fileId: null }; }
+        ? {
+            ...empty,
+            clientId: c.clientId || "", connected: !!c.connected, lastSyncedAt: c.lastSyncedAt || null,
+            email: c.email || "", folderId: c.folderId || null,
+            files: c.files && typeof c.files === "object" ? c.files : {},
+            tombstones: Array.isArray(c.tombstones) ? c.tombstones : [],
+          }
+        : empty;
+    } catch { return empty; }
   });
   const [cloudStatus, setCloudStatus] = useState("idle");
   const [cloudError, setCloudError] = useState("");
@@ -551,14 +574,6 @@ export default function Screenwriter() {
   const stateRef = useRef(); stateRef.current = { library, doc, currentId };
 
   const persistCloud = (n) => { setCloud(n); try { storage.api.setItem(CLOUD_KEY, JSON.stringify(n)); } catch {} };
-
-  const buildSnapshot = () => {
-    const { library: lib, doc: cd, currentId: cid } = stateRef.current;
-    const docs = {};
-    lib.forEach((p) => { const d = p.id === cid ? cd : loadProjectDoc(p.id); if (d) docs[p.id] = d; });
-    docs[cid] = cd;
-    return { library: lib, docs, updatedAt: Date.now() };
-  };
 
   const driveFetch = async (url, opts = {}) => {
     if (!tokenRef.current) throw new Error("Signed out. Reconnect to sync.");
@@ -580,59 +595,177 @@ export default function Screenwriter() {
     return (await c.json()).id;
   };
 
-  const findFile = async (folderId) => {
-    const q = encodeURIComponent(`name='screenwriter-sync.json' and '${folderId}' in parents and trashed=false`);
-    const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)`);
-    const d = await r.json();
-    return (d.files && d.files[0] && d.files[0].id) || null;
-  };
-
-  const createFile = async (folderId, content) => {
+  const multipart = (meta, content, contentType) => {
     const b = "swboundary";
-    const meta = { name: "screenwriter-sync.json", parents: [folderId], mimeType: "application/json" };
-    const body = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: application/json\r\n\r\n${content}\r\n--${b}--`;
-    const r = await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {
-      method: "POST", headers: { "Content-Type": `multipart/related; boundary=${b}` }, body,
-    });
-    return (await r.json()).id;
+    return {
+      headers: { "Content-Type": `multipart/related; boundary=${b}` },
+      body: `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${contentType}\r\n\r\n${content}\r\n--${b}--`,
+    };
   };
 
-  const pushToCloud = async (cfg) => {
-    const folderId = cfg.folderId || (await ensureFolder());
-    const content = JSON.stringify(buildSnapshot());
-    let fileId = cfg.fileId;
+  /* update carries the name too, so a title change renames the .fountain */
+  const upsertRemote = async (folderId, fileId, name, content, contentType) => {
     if (fileId) {
       try {
-        await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" }, body: content,
+        const r = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&fields=id,modifiedTime`, {
+          method: "PATCH", ...multipart({ name }, content, contentType),
         });
-      } catch { fileId = await createFile(folderId, content); }
-    } else fileId = await createFile(folderId, content);
-    return { folderId, fileId };
-  };
-
-  const pullFromCloud = async (cfg) => {
-    const folderId = cfg.folderId || (await ensureFolder());
-    const fileId = cfg.fileId || (await findFile(folderId));
-    if (!fileId) return { remote: null, folderId, fileId: null };
-    const r = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
-    let data = null;
-    try { data = JSON.parse(await r.text()); } catch {}
-    return { remote: data && Array.isArray(data.library) ? data : null, folderId, fileId };
-  };
-
-  const applySnapshot = (snap) => {
-    saveLibrary(snap.library);
-    Object.entries(snap.docs).forEach(([id, d]) => saveProjectDoc(id, migrateDoc(d)));
-    setLibrary(snap.library);
-    const keep = snap.docs[currentId] ? currentId : snap.library[0] && snap.library[0].id;
-    if (keep) {
-      skipSave.current = true;
-      setCurrentId(keep);
-      setDoc(migrateDoc(snap.docs[keep]) || DEFAULT_DOC());
-      setVersion((v) => v + 1);
-      setTreatmentTick((t) => t + 1);
+        return r.json();
+      } catch {} // fall through: the file may have been deleted remotely
     }
+    const r = await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime", {
+      method: "POST", ...multipart({ name, parents: [folderId] }, content, contentType),
+    });
+    return r.json();
+  };
+
+  const listRemote = async (folderId) => {
+    const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+    const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)&pageSize=1000`);
+    const d = await r.json();
+    const map = {};
+    let legacyId = null;
+    (d.files || []).forEach((f) => {
+      const m = PROJECT_FILE_RE.exec(f.name);
+      if (m) map[m[1]] = { fileId: f.id, modifiedTime: f.modifiedTime };
+      else if (f.name === "screenwriter-sync.json") legacyId = f.id;
+    });
+    return { map, legacyId };
+  };
+
+  const fetchFileJson = async (fileId) => {
+    const r = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+    try { return JSON.parse(await r.text()); } catch { return null; }
+  };
+
+  const deleteRemote = async (fileId) => {
+    try { await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, { method: "DELETE" }); }
+    catch (e) { if (!/404/.test(String(e && e.message))) throw e; }
+  };
+
+  const uploadProject = async (folderId, id, d, prev) => {
+    const payload = JSON.stringify({ id, title: d.title, updatedAt: Date.now(), doc: d });
+    const j = await upsertRemote(folderId, prev && prev.fileId, projectFileName(id), payload, "application/json");
+    let fountainId = (prev && prev.fountainId) || null;
+    try {
+      const fj = await upsertRemote(folderId, fountainId, fountainFileName(d.title, id), buildFountain(d), "text/plain");
+      fountainId = fj.id;
+    } catch {} // the .fountain is a companion artifact; losing it must not fail the sync
+    return { fileId: j.id, fountainId, modifiedTime: j.modifiedTime, syncedAt: Date.now() };
+  };
+
+  /* everything except versions[]; two docs with equal cores differ only in
+     saved-version history, which merges by id instead of conflicting */
+  const docCore = (x) => JSON.stringify({
+    t: x.title, h: x.theme, r: x.treatment || "", p: x.titlePage, c: x.characters, b: x.blocks,
+  });
+  const mergeVersions = (a, b) => {
+    const seen = new Set((a || []).map((v) => v.id));
+    return [...(a || []), ...(b || []).filter((v) => !seen.has(v.id))];
+  };
+  const conflictVersion = (remoteDoc) => ({
+    id: uid(), name: `Cloud copy (conflict) ${new Date().toLocaleString()}`, createdAt: Date.now(),
+    title: remoteDoc.title || "UNTITLED", theme: remoteDoc.theme || "", treatment: remoteDoc.treatment || "",
+    titlePage: remoteDoc.titlePage || { byline: "", contact: "" },
+    characters: remoteDoc.characters || {}, blocks: remoteDoc.blocks || [],
+  });
+
+  /* -- the one reconciliation routine: connect, the 60s tick, and "Sync now"
+        all land here. planSync (src/sync.js, tested in node) decides; this
+        executes. Conflicts keep the local copy live and stash the cloud copy
+        as an entry in the Versions panel, so nothing is ever discarded. -- */
+  const syncBusyRef = useRef(false);
+  const syncProjects = async () => {
+    if (syncBusyRef.current || !tokenRef.current) return;
+    syncBusyRef.current = true;
+    try {
+      const cfg = cloudRef.current;
+      const folderId = cfg.folderId || (await ensureFolder());
+      const files = { ...cfg.files };
+
+      /* locally deleted projects: remove their remote files */
+      const tombstones = [];
+      for (const t of cfg.tombstones || []) {
+        try {
+          if (t.fileId) await deleteRemote(t.fileId);
+          if (t.fountainId) await deleteRemote(t.fountainId);
+        } catch { tombstones.push(t); }
+      }
+
+      const { map: remote, legacyId } = await listRemote(folderId);
+      let lib = stateRef.current.library.slice();
+      const docOf = (id) => (id === stateRef.current.currentId ? stateRef.current.doc : loadProjectDoc(id));
+
+      /* one-time import of the old monolithic screenwriter-sync.json; the file
+         itself is left in place as a fallback */
+      if (!Object.keys(remote).length && legacyId) {
+        const snap = await fetchFileJson(legacyId);
+        if (snap && snap.docs) {
+          Object.entries(snap.docs).forEach(([id, d]) => {
+            if (lib.some((p) => p.id === id)) return; // local copy wins; it gets pushed below
+            const md = migrateDoc(d);
+            saveProjectDoc(id, md);
+            const le = (snap.library || []).find((p) => p.id === id);
+            lib.push({ id, title: md.title || "UNTITLED", updatedAt: (le && le.updatedAt) || Date.now() });
+          });
+        }
+      }
+
+      const actions = planSync({ library: lib, bases: files, remote });
+      for (const a of actions) {
+        const rem = remote[a.id];
+        if (a.op === "push") {
+          const d = docOf(a.id);
+          if (d) files[a.id] = await uploadProject(folderId, a.id, d, files[a.id]);
+        } else if (a.op === "pull") {
+          const entry = await fetchFileJson(rem.fileId);
+          if (!entry || !entry.doc) continue;
+          const md = migrateDoc(entry.doc);
+          saveProjectDoc(a.id, md);
+          const le = { id: a.id, title: md.title || "UNTITLED", updatedAt: Date.now() };
+          const i = lib.findIndex((p) => p.id === a.id);
+          if (i >= 0) lib[i] = le; else lib.push(le);
+          files[a.id] = { fileId: rem.fileId, fountainId: (files[a.id] || {}).fountainId || null, modifiedTime: rem.modifiedTime, syncedAt: Date.now() };
+          if (a.id === stateRef.current.currentId) {
+            skipSave.current = true;
+            setDoc(md); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
+          }
+        } else if (a.op === "conflict") {
+          const entry = await fetchFileJson(rem.fileId);
+          if (!entry || !entry.doc) continue;
+          const remoteDoc = migrateDoc(entry.doc);
+          const local = docOf(a.id) || DEFAULT_DOC();
+          const merged = mergeVersions(local.versions, remoteDoc.versions);
+          const next = docCore(remoteDoc) === docCore(local)
+            ? (merged.length !== (local.versions || []).length ? { ...local, versions: merged } : local)
+            : { ...local, versions: [...merged, conflictVersion(remoteDoc)] };
+          saveProjectDoc(a.id, next);
+          if (a.id === stateRef.current.currentId && next !== local) {
+            skipSave.current = true;
+            setDoc(next); // no version bump: blocks are unchanged, the caret must not move
+          }
+          files[a.id] = await uploadProject(folderId, a.id, next, { ...(files[a.id] || {}), fileId: rem.fileId });
+        } else if (a.op === "removeLocal") {
+          if (lib.length <= 1) { // never remove the last project; resurrect it instead
+            const d = docOf(a.id);
+            if (d) files[a.id] = await uploadProject(folderId, a.id, d, files[a.id]);
+            continue;
+          }
+          deleteProjectDoc(a.id);
+          lib = lib.filter((p) => p.id !== a.id);
+          delete files[a.id];
+          if (a.id === stateRef.current.currentId && lib[0]) {
+            const nd = loadProjectDoc(lib[0].id) || DEFAULT_DOC();
+            skipSave.current = true;
+            setCurrentId(lib[0].id); setDoc(nd); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
+          }
+        }
+      }
+
+      Object.keys(files).forEach((id) => { if (!lib.some((p) => p.id === id)) delete files[id]; });
+      saveLibrary(lib); setLibrary(lib);
+      persistCloud({ ...cloudRef.current, folderId, files, tombstones, lastSyncedAt: Date.now() });
+    } finally { syncBusyRef.current = false; }
   };
 
   const connectDrive = async (silent = false) => {
@@ -666,22 +799,9 @@ export default function Screenwriter() {
             const info = await ir.json();
             setSessionEmail(info.email || "signed in");
 
-            const cc = cloudRef.current;
-            const { remote, folderId, fileId } = await pullFromCloud(cc);
-            let fid = fileId;
-            if (remote && Object.keys(remote.docs).length && !cc.connected) {
-              const useRemote = window.confirm(
-                `Found a Drive backup with ${remote.library.length} script(s), saved ${timeAgo(remote.updatedAt)}.\n\nOK = load it here (replaces what's open)\nCancel = keep this device's copy and upload it`
-              );
-              if (useRemote) applySnapshot(remote);
-              else fid = (await pushToCloud({ ...cc, folderId, fileId })).fileId;
-            } else if (remote) {
-              if (remote.updatedAt > (cc.lastSyncedAt || 0) + 2000) applySnapshot(remote);
-              else fid = (await pushToCloud({ ...cc, folderId, fileId })).fileId;
-            } else {
-              fid = (await pushToCloud({ ...cc, folderId, fileId })).fileId;
-            }
-            persistCloud({ clientId, connected: true, lastSyncedAt: Date.now(), email: info.email || "", folderId, fileId: fid });
+            /* per-project sync merges; connecting never replaces anything */
+            persistCloud({ ...cloudRef.current, clientId, connected: true, email: info.email || "" });
+            await syncProjects();
             setCloudStatus("ok");
           } catch (err) {
             setCloudStatus("error");
@@ -707,9 +827,7 @@ export default function Screenwriter() {
     if (!cloud.connected) return;
     const t = setInterval(() => {
       if (!tokenRef.current) return;
-      pushToCloud(cloudRef.current)
-        .then(({ folderId, fileId }) => persistCloud({ ...cloudRef.current, folderId, fileId, lastSyncedAt: Date.now() }))
-        .catch(() => setCloudStatus("error"));
+      syncProjects().catch(() => setCloudStatus("error"));
     }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -719,8 +837,7 @@ export default function Screenwriter() {
     if (!cloud.connected) return;
     setCloudStatus("syncing");
     try {
-      const { folderId, fileId } = await pushToCloud(cloud);
-      persistCloud({ ...cloud, folderId, fileId, lastSyncedAt: Date.now() });
+      await syncProjects();
       setCloudStatus("ok");
     } catch (err) { setCloudStatus("error"); setCloudError(err.message); }
   };
@@ -873,6 +990,7 @@ export default function Screenwriter() {
               <div className="pop-panel">
                 <button className="menu-item" onClick={() => { setMenuOpen(false); fileRef.current.click(); }}><Upload size={14} /> Import script or backup</button>
                 <button className="menu-item" onClick={() => { setMenuOpen(false); exportJSON(); }}><FileJson size={14} /> Download backup (.json)</button>
+                <button className="menu-item" onClick={() => { setMenuOpen(false); downloadBlob(`${safeName(doc.title)}.fountain`, buildFountain(doc), "text/plain"); }}><FileText size={14} /> Download .fountain</button>
                 <button className="menu-item" onClick={() => { setMenuOpen(false); setTimeout(() => window.print(), 150); }}><Printer size={14} /> Print / save as PDF</button>
                 <div className="pop-hint" style={{ marginTop: 0 }}>In the print dialog, untick "Headers and footers" once — your browser remembers it.</div>
                 <button className="menu-item" onClick={() => setNight((v) => { try { storage.api.setItem("screenwriter-night", v ? "0" : "1"); } catch {} return !v; })}>

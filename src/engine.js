@@ -396,6 +396,82 @@ ${tp.join("\n")}
 </FinalDraft>`;
 }
 
+/* ------------------------------------------------------------------ fountain
+   Writer only. The .fountain that sync drops next to each project's JSON is a
+   readable, portable artifact -- it is regenerated from the JSON on every push
+   and never read back, so external edits to it do not merge. */
+export function buildFountain(doc) {
+  const paras = [];
+  const tp = doc.titlePage || {};
+  const head = [`Title: ${doc.title || "UNTITLED"}`];
+  if (tp.byline) head.push(`Author: ${tp.byline}`);
+  if (tp.contact) {
+    head.push("Contact:");
+    String(tp.contact).split("\n").forEach((l) => head.push(`   ${l}`));
+  }
+  paras.push(head.join("\n"));
+
+  /* a speech is one paragraph: character line, then dialogue/parentheticals */
+  const speech = (blks, dual) => {
+    const lines = [];
+    blks.forEach((b) => {
+      const t = b.text.trim();
+      if (!t) return;
+      if (b.type === "character") {
+        const up = t.toUpperCase();
+        // fountain only recognizes an all-caps character cue; force others with @
+        lines.push((up === t ? up : `@${t}`) + (dual ? " ^" : ""));
+      } else if (b.type === "parenthetical") {
+        lines.push(t.startsWith("(") ? t : `(${t})`);
+      } else {
+        lines.push(t);
+      }
+    });
+    return lines.length ? lines.join("\n") : null;
+  };
+
+  const groups = groupBlocks(doc.blocks || []);
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    if (g.kind === "dual") {
+      const l = speech(g.left, false);
+      const r = speech(g.right, true);
+      if (l) paras.push(l);
+      if (r) paras.push(r);
+      continue;
+    }
+    const b = g.block;
+    const t = b.text.trim();
+    if (!t) continue;
+    if (b.type === "heading") {
+      const up = t.toUpperCase();
+      paras.push(HEADING_RE.test(up) ? up : `.${t}`);
+    } else if (b.type === "transition") {
+      const up = t.toUpperCase();
+      paras.push(TRANSITION_RE.test(up) ? up : `> ${t}`);
+    } else if (b.type === "character") {
+      /* one speech = one paragraph: a blank line between the cue and its
+         dialogue would make fountain read the cue as action */
+      const blks = [b];
+      while (
+        i + 1 < groups.length && groups[i + 1].kind === "single" &&
+        (groups[i + 1].block.type === "dialogue" || groups[i + 1].block.type === "parenthetical")
+      ) blks.push(groups[++i].block);
+      const s = speech(blks, false);
+      if (s) paras.push(s);
+    } else if (b.type === "dialogue" || b.type === "parenthetical") {
+      // stray dialogue with no cue: print it, escaped from other meanings
+      const s = speech([b], false);
+      if (s) paras.push(s);
+    } else {
+      // action that would parse as a heading or transition must be escaped
+      paras.push(HEADING_RE.test(t) || TRANSITION_RE.test(t.toUpperCase()) ? `!${t}` : t);
+    }
+  }
+
+  return paras.join("\n\n") + "\n";
+}
+
 /* ------------------------------------------------------------- DOM <-> model
    The editor is one contenteditable surface. These two functions are the only
    bridge between the block list and its HTML. Keeping them pure makes them
