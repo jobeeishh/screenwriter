@@ -351,6 +351,33 @@ export const CSS = `
 }
 .collab-banner button.dismiss { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
 
+/* ---- dictation ---- */
+@keyframes dictpulse {
+  0% { box-shadow: 0 0 0 0 rgba(169,121,60,.45); }
+  100% { box-shadow: 0 0 0 8px rgba(169,121,60,0); }
+}
+.icon-btn.live, .mbar-btn.live {
+  color: #fff; background: var(--accent2); border-color: var(--accent2);
+  animation: dictpulse 1.6s ease-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .icon-btn.live, .mbar-btn.live { animation: none; } }
+.dict-bar {
+  position: fixed; left: 0; right: 0; z-index: 21;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px; font-size: 12px;
+  background: var(--panel); border-top: 1px solid var(--line); color: var(--dim);
+  white-space: nowrap; overflow: hidden;
+}
+.dict-bar.err { color: #B4453B; }
+.dict-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); animation: dictpulse 1.6s ease-out infinite; }
+.dict-echo {
+  flex: 0 0 auto; padding: 2px 8px; border-radius: 999px;
+  background: var(--panel2); border: 1px solid var(--line);
+  font-size: 11px; font-weight: 600; color: var(--accent);
+}
+.dict-interim { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-style: italic; color: var(--faint); }
+.mbar-mic { font-size: 15px; line-height: 1; }
+
 /* ---- mobile element bar ---- */
 .mbar {
   position: fixed; left: 0; right: 0; z-index: 20;

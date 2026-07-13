@@ -103,7 +103,7 @@ const scrollParent = (node) => {
 
 /* =========================================================================== */
 const ScriptEditor = forwardRef(function ScriptEditor(
-  { blocks, version, onChange, onCaretBlock, night },
+  { blocks, version, onChange, onCaretBlock, night, dict },
   ref
 ) {
   const rootRef = useRef(null);
@@ -180,6 +180,20 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     onChange(nextBlocks, true);
   }, [onChange]);
 
+  /* find the block dictation should act on: the caret's block, else the one
+     the caret was last seen in, else the end of the script */
+  const targetBlock = () => {
+    const root = rootRef.current;
+    if (!root) return null;
+    let blk = currentBlock(root);
+    if (!blk) {
+      blk = (lastBlkIdRef.current && root.querySelector(`[data-id="${lastBlkIdRef.current}"]`)) ||
+        root.querySelector(".blk:last-of-type");
+      if (blk) setCaret(blk, "end");
+    }
+    return blk;
+  };
+
   useImperativeHandle(ref, () => ({
     focusBlock(id) {
       const root = rootRef.current;
@@ -189,6 +203,67 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     },
     toggleDual,
     root: () => rootRef.current,
+
+    /* ------- dictation interface: all DOM mutation stays in here ------- */
+    insertText(str) {
+      const root = rootRef.current;
+      if (!root || !str) return;
+      const blk = targetBlock();
+      if (!blk) return;
+      if (blk.childNodes.length === 1 && blk.firstChild.nodeName === "BR") {
+        blk.innerHTML = "";
+        setCaret(blk, 0);
+      }
+      document.execCommand("insertText", false, str);
+      decorate();
+      sync();
+    },
+    setCurrentType(type) { applyType(type); },
+    newBlockAfterCurrent(type, text) {
+      const root = rootRef.current;
+      if (!root) return;
+      const blk = targetBlock();
+      const anchor = blk && isInDual(blk) ? blk.parentNode.parentNode : blk;
+      const nb = makeBlk(type, text || "");
+      if (anchor) anchor.after(nb); else root.appendChild(nb);
+      setCaret(nb, "end");
+      lastBlkIdRef.current = nb.dataset.id;
+      setCaretType(type);
+      if (type === "character") openMenuFor(nb); else closeMenu();
+      sync(true);
+    },
+    pressEnter() {
+      const root = rootRef.current;
+      const blk = targetBlock();
+      if (root && blk) handleEnter(blk, root);
+    },
+    getContext() {
+      const root = rootRef.current;
+      const blk = root && (currentBlock(root) ||
+        (lastBlkIdRef.current && root.querySelector(`[data-id="${lastBlkIdRef.current}"]`)));
+      if (!blk) return { type: null, before: "" };
+      const inCaret = currentBlock(root) === blk;
+      const text = blk.textContent.replace(/\u00a0/g, " ");
+      return { type: blk.dataset.type, before: inCaret ? text.slice(0, caretOffset(blk)) : text };
+    },
+    deleteBeforeCaret(n) {
+      const root = rootRef.current;
+      if (!root || !n) return;
+      const blk = currentBlock(root);
+      if (!blk) return;
+      const t = blk.firstChild && blk.firstChild.nodeType === 3 ? blk.firstChild : null;
+      if (!t) return;
+      const end = Math.min(caretOffset(blk), t.length);
+      const start = Math.max(0, end - n);
+      if (start >= end) return;
+      const sel = window.getSelection();
+      const r = document.createRange();
+      r.setStart(t, start); r.setEnd(t, end);
+      sel.removeAllRanges(); sel.addRange(r);
+      document.execCommand("delete");
+      decorate();
+      sync();
+    },
   }));
 
   /* ---------------- normalize stray DOM the browser may create --------- */
@@ -550,6 +625,25 @@ const ScriptEditor = forwardRef(function ScriptEditor(
         </div>
       )}
 
+      {/* dictation preview: interim words + command echo, docked above the
+          element bar (or the keyboard, or the window bottom on desktop) */}
+      {dict && dict.state !== "idle" && (
+        <div
+          className={`dict-bar${night ? " night" : ""}${dict.state !== "listening" ? " err" : ""}`}
+          style={{ bottom: barVisible ? kbTop + ((barRef.current && barRef.current.offsetHeight) || 44) : coarse ? kbTop : 0 }}
+        >
+          {dict.state === "denied" && <span>Enable mic access in your browser settings to dictate.</span>}
+          {dict.state === "network" && <span>Dictation needs a connection — speech is recognized server-side.</span>}
+          {dict.state === "listening" && (
+            <>
+              <span className="dict-dot" aria-hidden="true" />
+              {dict.echo && <span className="dict-echo">{dict.echo}</span>}
+              <span className="dict-interim">{dict.interim || (dict.echo ? "" : "Listening…")}</span>
+            </>
+          )}
+        </div>
+      )}
+
       {barVisible && (
         <div className={`mbar${night ? " night" : ""}`} ref={barRef} style={{ bottom: kbTop }}>
           {menu && (
@@ -567,6 +661,17 @@ const ScriptEditor = forwardRef(function ScriptEditor(
             </div>
           )}
           <div className="mbar-row mbar-types">
+            {dict && dict.supported && (
+              <button
+                type="button"
+                className={`mbar-btn mbar-mic${dict.state === "listening" ? " on live" : ""}`}
+                title={dict.state === "listening" ? "Stop dictation" : "Dictate"}
+                onMouseDown={(e) => e.preventDefault() /* keep the caret */}
+                onClick={dict.toggle /* click = certain user activation for rec.start() */}
+              >
+                🎙
+              </button>
+            )}
             {BAR_TYPES.map(([type, label]) => (
               <button
                 key={type}

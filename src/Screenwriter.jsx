@@ -3,7 +3,7 @@ import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload, Clapperboard,
   Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText, History,
   RotateCcw, SeparatorHorizontal, Bold, List, Maximize2, CheckCircle2,
-  MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi,
+  MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic,
 } from "lucide-react";
 import ScriptEditor from "./ScriptEditor.jsx";
 import {
@@ -11,6 +11,7 @@ import {
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
 } from "./engine.js";
 import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope, hashStr } from "./sync.js";
+import { createDictation } from "./dictation.js";
 import { CSS } from "./styles.js";
 import { GOOGLE_CLIENT_ID, COLLAB_URL } from "./config.js";
 
@@ -38,6 +39,7 @@ const LIB_KEY = "screenwriter-library-v1";
 const CLOUD_KEY = "screenwriter-cloud-v1";
 const COLLAB_KEY = "screenwriter-collab-v1";
 const COLLAB_NAME_KEY = "screenwriter-collab-name";
+const DICT_KEY = "screenwriter-dictation-v1";
 const OLD_KEY = "screenwriter-doc-v1";
 const docKey = (id) => `screenwriter-doc-v1:${id}`;
 
@@ -217,6 +219,16 @@ export default function Screenwriter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId]);
 
+  const applyHistory = useCallback((redo) => {
+    const h = hist.current;
+    if (redo && h.idx < h.stack.length - 1) h.idx += 1;
+    else if (!redo && h.idx > 0) h.idx -= 1;
+    else return;
+    h.quiet = true;
+    setDoc((d) => ({ ...d, blocks: JSON.parse(h.stack[h.idx]) }));
+    setVersion((v) => v + 1);
+  }, []);
+
   useEffect(() => {
     const onKey = (e) => {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -224,17 +236,11 @@ export default function Screenwriter() {
       if (k !== "z" && k !== "y") return;
       if (e.target.closest && e.target.closest(".treatment-editor")) return;
       e.preventDefault();
-      const h = hist.current;
-      const redo = k === "y" || e.shiftKey;
-      if (redo && h.idx < h.stack.length - 1) h.idx += 1;
-      else if (!redo && h.idx > 0) h.idx -= 1;
-      else return;
-      h.quiet = true;
-      setDoc((d) => ({ ...d, blocks: JSON.parse(h.stack[h.idx]) }));
-      setVersion((v) => v + 1);
+      applyHistory(k === "y" || e.shiftKey);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ---------------- autosave + streak ---------------- */
@@ -1237,6 +1243,83 @@ export default function Screenwriter() {
     setDoc((d) => ({ ...d, collabKey: genCollabKey() }));
   };
 
+  /* ---------------- voice dictation ----------------
+     All recognition + grammar logic lives in src/dictation.js (pure,
+     node-tested). This layer only owns UI state and maps parsed ops onto
+     the editor's imperative handle -- the editor keeps sole custody of its
+     DOM, per the editor contract. */
+  const [dictSettings, setDictSettings] = useState(() => {
+    try { return { commands: true, ...JSON.parse(storage.api.getItem(DICT_KEY) || "{}") }; }
+    catch { return { commands: true }; }
+  });
+  const [dictState, setDictState] = useState("idle"); // idle | listening | denied | network
+  const [dictInterim, setDictInterim] = useState("");
+  const [dictEcho, setDictEcho] = useState("");
+  const dictRef = useRef(null);
+  const dictSettingsRef = useRef(dictSettings); dictSettingsRef.current = dictSettings;
+  const dictEchoTimer = useRef(null);
+  const dictErrTimer = useRef(null);
+  const lastDictLenRef = useRef(0); // for "scratch that"
+
+  const runDictOps = (ops, echo) => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    let textLen = 0;
+    ops.forEach((o) => {
+      if (o.op === "text") { ed.insertText(o.text); textLen += o.text.length; }
+      else if (o.op === "newBlock") { ed.newBlockAfterCurrent(o.type, o.text || ""); textLen = 0; }
+      else if (o.op === "enter") { ed.pressEnter(); textLen = 0; }
+      else if (o.op === "undo") applyHistory(false);
+      else if (o.op === "deleteLast") { ed.deleteBeforeCaret(lastDictLenRef.current); lastDictLenRef.current = 0; }
+      else if (o.op === "stop" && dictRef.current) dictRef.current.stop();
+    });
+    if (textLen) lastDictLenRef.current = textLen;
+    if (echo) {
+      setDictEcho(echo);
+      clearTimeout(dictEchoTimer.current);
+      dictEchoTimer.current = setTimeout(() => setDictEcho(""), 2500);
+    }
+  };
+  const runDictOpsRef = useRef(runDictOps); runDictOpsRef.current = runDictOps;
+
+  const getDictation = () => {
+    if (dictRef.current) return dictRef.current;
+    dictRef.current = createDictation({
+      onInterim: setDictInterim,
+      onOps: (ops, echo) => runDictOpsRef.current(ops, echo),
+      onStateChange: (s) => {
+        setDictState(s);
+        if (s === "denied" || s === "network") {
+          clearTimeout(dictErrTimer.current);
+          dictErrTimer.current = setTimeout(() => setDictState("idle"), 4000);
+        }
+      },
+      getContext: () => (editorRef.current ? editorRef.current.getContext() : { type: null, before: "" }),
+      getOptions: () => ({ ...dictSettingsRef.current, lang: "en-US" }),
+    });
+    return dictRef.current;
+  };
+  const dictSupported = typeof window !== "undefined" && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  /* rec.start() must run inside the tap handler or mobile silently fails */
+  const toggleDictation = () => getDictation().toggle();
+  const toggleDictCommands = () => {
+    setDictSettings((s) => {
+      const n = { ...s, commands: !s.commands };
+      try { storage.api.setItem(DICT_KEY, JSON.stringify(n)); } catch {}
+      return n;
+    });
+  };
+  useEffect(() => () => { if (dictRef.current) dictRef.current.stop(); }, []);
+
+  const dictProp = {
+    supported: dictSupported,
+    state: dictState,
+    interim: dictInterim,
+    echo: dictEcho,
+    toggle: toggleDictation,
+  };
+
+
   /* ---------------- board drag ---------------- */
   const doMove = (from, to) => { if (from != null && to != null && from !== to) setBlocks(moveSceneBlocks(doc.blocks, from, to)); };
 
@@ -1301,6 +1384,16 @@ export default function Screenwriter() {
           <input ref={fileRef} type="file" accept=".sws,.json,.fdx,.txt,.fountain" style={{ display: "none" }} onChange={importFile} />
           <button className="export-btn" onClick={exportFDX}><Download size={14} /> FDX</button>
 
+          {dictSupported && (
+            <button
+              className={`icon-btn${dictState === "listening" ? " on live" : ""}`}
+              title={dictState === "listening" ? "Stop dictation" : "Dictate"}
+              onMouseDown={(e) => e.preventDefault() /* keep the caret; click still fires */}
+              onClick={toggleDictation}
+            >
+              <Mic size={16} />
+            </button>
+          )}
           {COLLAB_URL && (
             <button className={`icon-btn${collabEnabled ? " on" : ""}`} title={collabEnabled ? "Leave live session" : "Start live session"} onClick={toggleCollab}>
               <Wifi size={16} />
@@ -1399,6 +1492,11 @@ export default function Screenwriter() {
                 <button className="menu-item" onClick={() => { setMenuOpen(false); editorRef.current && editorRef.current.toggleDual(); }}><Columns size={14} /> Toggle dual dialogue (⌘D)</button>
                 {doc.collabKey && (
                   <button className="menu-item" onClick={() => { setMenuOpen(false); rotateCollabKey(); }}><Wifi size={14} /> Reset live session access</button>
+                )}
+                {dictSupported && (
+                  <button className="menu-item" onClick={toggleDictCommands}>
+                    <Mic size={14} /> Voice commands: {dictSettings.commands ? "on" : "off"}
+                  </button>
                 )}
                 <div className="pop-label" style={{ marginTop: 12 }}>Title page</div>
                 <input className="pop-input" placeholder="Written by" value={(doc.titlePage && doc.titlePage.byline) || ""}
@@ -1543,7 +1641,7 @@ export default function Screenwriter() {
               </div>
             ))}
 
-            <ScriptEditor ref={editorRef} blocks={doc.blocks} version={version} onChange={onEditorChange} night={night} />
+            <ScriptEditor ref={editorRef} blocks={doc.blocks} version={version} onChange={onEditorChange} night={night} dict={dictProp} />
           </div>
           <div className="hint-bar">
             enter&thinsp;next element &nbsp;&middot;&nbsp; tab&thinsp;change type &nbsp;&middot;&nbsp; ⌘D&thinsp;dual dialogue &nbsp;&middot;&nbsp; ⌘Z&thinsp;undo
