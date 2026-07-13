@@ -82,6 +82,29 @@ const safeName = (t) => (t.trim() || "untitled").toLowerCase().replace(/[^a-z0-9
 const genCollabKey = () =>
   Array.from(crypto.getRandomValues(new Uint8Array(12))).map((b) => (b % 36).toString(36)).join("");
 
+/* Everything except versions[]: two docs with equal cores differ only in
+   saved-version history, which merges by id instead of conflicting. Used by
+   Drive sync, .sws import, and live sessions to keep losing copies
+   recoverable. Pure -- no component state. */
+const docCore = (x) => JSON.stringify({
+  t: x.title, h: x.theme, r: x.treatment || "", p: x.titlePage, c: x.characters, b: x.blocks,
+});
+const mergeVersions = (a, b) => {
+  const seen = new Set((a || []).map((v) => v.id));
+  return [...(a || []), ...(b || []).filter((v) => !seen.has(v.id))];
+};
+const docVersionOf = (d, vname) => ({
+  id: uid(), name: vname, createdAt: Date.now(),
+  title: d.title || "UNTITLED", theme: d.theme || "", treatment: d.treatment || "",
+  titlePage: d.titlePage || { byline: "", contact: "" },
+  characters: d.characters || {}, blocks: d.blocks || [],
+});
+/* what "has this doc changed since it was synced" means: the core PLUS the
+   version list PLUS the collab key -- stashes, saved versions, and key
+   rotations must all reach Drive even though docCore ignores them
+   (version entries are immutable, so ids suffice) */
+const syncHash = (d) => hashStr(docCore(d) + "|" + (d.versions || []).map((v) => v.id).join(",") + "|" + (d.collabKey || ""));
+
 function timeAgo(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
   if (s < 60) return "just now";
@@ -244,15 +267,24 @@ export default function Screenwriter() {
   }, []);
 
   /* ---------------- autosave + streak ---------------- */
-  const touchLibrary = useCallback((id, title) => {
+  const touchLibrary = useCallback((id, title, bump = true) => {
     setLibrary((lib) => {
-      const next = lib.map((p) => (p.id === id ? { ...p, title: title || "UNTITLED", updatedAt: Date.now() } : p));
+      const next = lib.map((p) => (p.id === id ? { ...p, title: title || "UNTITLED", updatedAt: bump ? Date.now() : p.updatedAt } : p));
       saveLibrary(next);
       return next;
     });
   }, []);
 
-  const persist = useCallback((id, d) => { saveProjectDoc(id, d); touchLibrary(id, d.title); }, [touchLibrary]);
+  /* updatedAt is the EDIT clock and sync trusts it to pick conflict winners:
+     it must only advance when content actually changed. The mount autosave
+     re-persists an identical doc on every app open -- stamping then made a
+     merely-opened stale device look freshly edited, and its old copy could
+     beat (and roll back) newer work from another device. */
+  const persist = useCallback((id, d) => {
+    const prev = loadProjectDoc(id);
+    saveProjectDoc(id, d);
+    touchLibrary(id, d.title, !prev || syncHash(prev) !== syncHash(d));
+  }, [touchLibrary]);
 
   /* assigned by the cloud section; the autosave below fires it so edits reach
      Drive seconds after they settle instead of waiting for the 60s tick */
@@ -409,29 +441,6 @@ export default function Screenwriter() {
     title: doc.title, theme: doc.theme, treatment: doc.treatment || "",
     titlePage: doc.titlePage, characters: doc.characters, blocks: doc.blocks,
   }));
-
-  /* Everything except versions[]: two docs with equal cores differ only in
-     saved-version history, which merges by id instead of conflicting. Used by
-     both Drive sync and .sws import to keep the losing copy recoverable. */
-  const docCore = (x) => JSON.stringify({
-    t: x.title, h: x.theme, r: x.treatment || "", p: x.titlePage, c: x.characters, b: x.blocks,
-  });
-  const mergeVersions = (a, b) => {
-    const seen = new Set((a || []).map((v) => v.id));
-    return [...(a || []), ...(b || []).filter((v) => !seen.has(v.id))];
-  };
-  const docVersionOf = (d, vname) => ({
-    id: uid(), name: vname, createdAt: Date.now(),
-    title: d.title || "UNTITLED", theme: d.theme || "", treatment: d.treatment || "",
-    titlePage: d.titlePage || { byline: "", contact: "" },
-    characters: d.characters || {}, blocks: d.blocks || [],
-  });
-
-  /* what "has this doc changed since it was synced" means: the core PLUS the
-     version list PLUS the collab key -- stashes, saved versions, and key
-     rotations must all reach Drive even though docCore ignores them
-     (version entries are immutable, so ids suffice) */
-  const syncHash = (d) => hashStr(docCore(d) + "|" + (d.versions || []).map((v) => v.id).join(",") + "|" + (d.collabKey || ""));
 
   const saveVersion = () => {
     const name = window.prompt("Name this version:", `Draft ${(doc.versions || []).length + 1}`);
@@ -774,7 +783,7 @@ export default function Screenwriter() {
   const uploadProject = async (folderId, id, d, prev, asOf) => {
     /* the PATCH carries the name, so a legacy sw-<id>.json becomes a
        title-named .sws in place on its first push after this build */
-    const j = await upsertRemote(folderId, prev && prev.fileId, swsFileName(d.title, id), JSON.stringify(swsEnvelope(id, d)), "application/json");
+    const j = await upsertRemote(folderId, prev && prev.fileId, swsFileName(d.title, id), JSON.stringify(swsEnvelope(id, d, asOf)), "application/json");
     let fountainId = (prev && prev.fountainId) || null;
     try {
       const bf = await ensureBackupFolder(folderId);
@@ -891,7 +900,9 @@ export default function Screenwriter() {
           const md = migrateDoc(entry.doc);
           saveProjectDoc(a.id, md);
           const now = Date.now();
-          const le = { id: a.id, title: md.title || "UNTITLED", updatedAt: now };
+          /* a pull is not an edit: carry the pusher's edit time so this
+             device never claims recency it doesn't have */
+          const le = { id: a.id, title: md.title || "UNTITLED", updatedAt: entry.updatedAt || now };
           const i = lib.findIndex((p) => p.id === a.id);
           if (i >= 0) lib[i] = le; else lib.push(le);
           files[a.id] = { fileId: rem.fileId, fountainId: (files[a.id] || {}).fountainId || null, modifiedTime: rem.modifiedTime, syncedAt: now, coreHash: syncHash(md) };
@@ -904,18 +915,36 @@ export default function Screenwriter() {
           if (!entry || !entry.doc) continue;
           const remoteDoc = migrateDoc(entry.doc);
           const local = docOf(a.id) || DEFAULT_DOC();
+          const locEntry = lib.find((p) => p.id === a.id) || {};
           const merged = mergeVersions(local.versions, remoteDoc.versions);
-          const next = docCore(remoteDoc) === docCore(local)
-            ? (merged.length !== (local.versions || []).length ? { ...local, versions: merged } : local)
-            : { ...local, versions: [...merged, docVersionOf(remoteDoc, `Cloud copy (conflict) ${new Date().toLocaleString()}`)] };
+          /* the MORE RECENTLY EDITED side takes the live slot; the other is
+             stashed. "Local always wins" let a device that had been sitting
+             on an old copy revert everyone else's newer work the moment it
+             came back online -- the loser must be decided by edit recency,
+             never by who happened to notice the conflict. */
+          const remoteWins = (entry.updatedAt || 0) > (locEntry.updatedAt || 0);
+          let next;
+          if (docCore(remoteDoc) === docCore(local)) {
+            next = merged.length !== (local.versions || []).length ? { ...local, versions: merged } : local;
+          } else if (remoteWins) {
+            next = { ...remoteDoc, versions: [...merged, docVersionOf(local, `This device's copy (conflict) ${new Date().toLocaleString()}`)] };
+          } else {
+            next = { ...local, versions: [...merged, docVersionOf(remoteDoc, `Cloud copy (conflict) ${new Date().toLocaleString()}`)] };
+          }
           saveProjectDoc(a.id, next);
+          if (remoteWins) {
+            const i = lib.findIndex((p) => p.id === a.id);
+            const le = { id: a.id, title: next.title || "UNTITLED", updatedAt: entry.updatedAt || Date.now() };
+            if (i >= 0) lib[i] = le; else lib.push(le);
+          }
           if (a.id === stateRef.current.currentId && next !== local) {
             skipSave.current = true;
-            setDoc(next); // no version bump: blocks are unchanged, the caret must not move
+            setDoc(next);
+            if (remoteWins) { setVersion((v) => v + 1); setTreatmentTick((t) => t + 1); } // blocks changed
           }
           files[a.id] = await uploadProject(
             folderId, a.id, next, { ...(files[a.id] || {}), fileId: rem.fileId },
-            (lib.find((p) => p.id === a.id) || {}).updatedAt
+            remoteWins ? (entry.updatedAt || Date.now()) : locEntry.updatedAt
           );
         } else if (a.op === "removeLocal") {
           if (lib.length <= 1) { // never remove the last project; resurrect it instead
@@ -1078,6 +1107,19 @@ export default function Screenwriter() {
   const collabWS = useRef(null);
   const remoteApplyRef = useRef(false);
   const lastKnownCoreRef = useRef(""); // last core both sides agreed on
+  /* every content state this client has passed through (hashes, ring-capped).
+     An incoming copy matching one of them is our own past: a peer that
+     reconnected while behind. Applying it would roll the script back --
+     ignore it and send them the present instead. */
+  const seenCoresRef = useRef({ list: [], set: new Set() });
+  const rememberCore = (coreStr) => {
+    const h = hashStr(coreStr);
+    const s = seenCoresRef.current;
+    if (s.set.has(h)) return;
+    s.set.add(h); s.list.push(h);
+    if (s.list.length > 400) s.set.delete(s.list.shift());
+  };
+  useEffect(() => { seenCoresRef.current = { list: [], set: new Set() }; }, [currentId]);
   const lastEditAtRef = useRef(0);
   const typingSentAtRef = useRef(0);
   const typingClearRef = useRef(null);
@@ -1137,6 +1179,7 @@ export default function Screenwriter() {
     setDoc(next); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
     persist(stateRef.current.currentId, next);
     lastKnownCoreRef.current = docCore(next);
+    rememberCore(lastKnownCoreRef.current);
     setRemotePending(null);
   };
 
@@ -1158,7 +1201,10 @@ export default function Screenwriter() {
     }
     if (m.type === "doc" && m.core) {
       const incoming = coreKey(m.core);
-      if (incoming === docCore(stateRef.current.doc)) { lastKnownCoreRef.current = incoming; return; }
+      if (incoming === docCore(stateRef.current.doc)) { lastKnownCoreRef.current = incoming; rememberCore(incoming); return; }
+      /* our own past state: the peer is behind (rejoined after being away).
+         Never apply -- that is the rollback -- catch them up instead. */
+      if (seenCoresRef.current.set.has(hashStr(incoming))) { sendDocNow(); return; }
       if (Date.now() - lastEditAtRef.current < 3000) setRemotePending({ from: m.from || "Someone", core: m.core, basedOn: m.basedOn });
       else applyRemote(m.core, m.basedOn);
     }
@@ -1212,6 +1258,7 @@ export default function Screenwriter() {
   useEffect(() => {
     if (remoteApplyRef.current) { remoteApplyRef.current = false; return; }
     if (!collabWS.current || collabWS.current.readyState !== 1) return;
+    rememberCore(docCore(doc));
     lastEditAtRef.current = Date.now();
     if (Date.now() - typingSentAtRef.current > 2000) { typingSentAtRef.current = Date.now(); sendWS({ type: "editing" }); }
     clearTimeout(sendTimerRef.current);

@@ -37,9 +37,11 @@ const slug = (title) =>
 export const swsFileName = (title, id) => `${slug(title)}-${id}.sws`;
 export const fountainFileName = (title, id) => `${slug(title)}-${id}.fountain`;
 
-export const swsEnvelope = (id, doc) => ({
+/* updatedAt is the EDIT clock, not the push clock: a stale device pushing
+   right now must not look newer than work written ten minutes ago */
+export const swsEnvelope = (id, doc, editedAt) => ({
   format: "screenwriter-script", version: 1, id,
-  title: doc.title || "UNTITLED", updatedAt: Date.now(), doc,
+  title: doc.title || "UNTITLED", updatedAt: editedAt != null ? editedAt : Date.now(), doc,
 });
 
 /* cheap stable hash (djb2) for content-identity comparisons */
