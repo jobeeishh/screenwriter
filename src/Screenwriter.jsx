@@ -10,7 +10,7 @@ import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
 } from "./engine.js";
-import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope } from "./sync.js";
+import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope, hashStr } from "./sync.js";
 import { CSS } from "./styles.js";
 import { GOOGLE_CLIENT_ID, COLLAB_URL } from "./config.js";
 
@@ -73,6 +73,12 @@ function initLibrary() {
 }
 
 const safeName = (t) => (t.trim() || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+/* live-session room secret: ~62 bits of real entropy, unlike uid(). It lives
+   in the doc, so it syncs to your devices and travels inside the .sws -- the
+   file really is the invitation. Rotating it moves the room. */
+const genCollabKey = () =>
+  Array.from(crypto.getRandomValues(new Uint8Array(12))).map((b) => (b % 36).toString(36)).join("");
 
 function timeAgo(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -242,12 +248,20 @@ export default function Screenwriter() {
 
   const persist = useCallback((id, d) => { saveProjectDoc(id, d); touchLibrary(id, d.title); }, [touchLibrary]);
 
+  /* assigned by the cloud section; the autosave below fires it so edits reach
+     Drive seconds after they settle instead of waiting for the 60s tick */
+  const scheduleQuickSyncRef = useRef(() => {});
+  /* the pending (debounced) autosave, flushable when the page is hidden */
+  const flushSaveRef = useRef(null);
+
   useEffect(() => {
     if (skipSave.current) { skipSave.current = false; return; }
     setSaveState("saving");
-    const t = setTimeout(() => {
+    const run = () => {
+      flushSaveRef.current = null;
       persist(currentId, doc);
       setSaveState("saved");
+      scheduleQuickSyncRef.current();
       const today = new Date().toISOString().slice(0, 10);
       if (streakRef.current.last !== today) {
         const yest = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
@@ -255,10 +269,22 @@ export default function Screenwriter() {
         setStreak(next);
         try { storage.api.setItem("screenwriter-streak", JSON.stringify(next)); } catch {}
       }
-    }, 600);
-    return () => clearTimeout(t);
+    };
+    const t = setTimeout(run, 600);
+    flushSaveRef.current = run;
+    return () => { clearTimeout(t); flushSaveRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc]);
+
+  /* pocketing the phone freezes timers; write the pending autosave NOW or the
+     last 600ms of typing exists nowhere */
+  useEffect(() => {
+    const flush = () => { if (flushSaveRef.current) flushSaveRef.current(); };
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
 
   useEffect(() => {
     const h = (e) => {
@@ -394,6 +420,12 @@ export default function Screenwriter() {
     titlePage: d.titlePage || { byline: "", contact: "" },
     characters: d.characters || {}, blocks: d.blocks || [],
   });
+
+  /* what "has this doc changed since it was synced" means: the core PLUS the
+     version list PLUS the collab key -- stashes, saved versions, and key
+     rotations must all reach Drive even though docCore ignores them
+     (version entries are immutable, so ids suffice) */
+  const syncHash = (d) => hashStr(docCore(d) + "|" + (d.versions || []).map((v) => v.id).join(",") + "|" + (d.collabKey || ""));
 
   const saveVersion = () => {
     const name = window.prompt("Name this version:", `Draft ${(doc.versions || []).length + 1}`);
@@ -606,7 +638,7 @@ export default function Screenwriter() {
      screenwriter-sync.json -- dropped here; the legacy file is detected by
      name and imported once. */
   const [cloud, setCloud] = useState(() => {
-    const empty = { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, backupFolderId: null, files: {}, tombstones: [] };
+    const empty = { clientId: "", connected: false, lastSyncedAt: null, email: "", folderId: null, backupFolderId: null, legacySeen: null, files: {}, tombstones: [] };
     try {
       const c = JSON.parse(storage.api.getItem(CLOUD_KEY) || "null");
       return c && typeof c === "object"
@@ -614,6 +646,7 @@ export default function Screenwriter() {
             ...empty,
             clientId: c.clientId || "", connected: !!c.connected, lastSyncedAt: c.lastSyncedAt || null,
             email: c.email || "", folderId: c.folderId || null, backupFolderId: c.backupFolderId || null,
+            legacySeen: c.legacySeen || null,
             files: c.files && typeof c.files === "object" ? c.files : {},
             tombstones: Array.isArray(c.tombstones) ? c.tombstones : [],
           }
@@ -636,7 +669,13 @@ export default function Screenwriter() {
   const driveFetch = async (url, opts = {}) => {
     if (!tokenRef.current) throw new Error("Signed out. Reconnect to sync.");
     const res = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${tokenRef.current}` } });
-    if (res.status === 401) throw new Error("Signed out. Reconnect to sync.");
+    if (res.status === 401) {
+      /* the token is dead (they last ~1h; the 50-min refresh timer freezes
+         when the tab is backgrounded). Null it so the wake handler knows to
+         re-establish the session rather than keep failing with it. */
+      tokenRef.current = null;
+      throw new Error("Signed out. Reconnect to sync.");
+    }
     if (!res.ok) throw new Error(`Drive said ${res.status}`);
     return res;
   };
@@ -691,9 +730,9 @@ export default function Screenwriter() {
       if (m) { map[m[1]] = { fileId: f.id, modifiedTime: f.modifiedTime }; return; }
       const fn = FOUNTAIN_FILE_RE.exec(f.name);
       if (fn) { fountains[fn[1]] = f.id; return; }
-      if (f.name === "screenwriter-sync.json") legacyId = f.id;
+      if (f.name === "screenwriter-sync.json") legacyId = { fileId: f.id, modifiedTime: f.modifiedTime };
     });
-    return { map, fountains, legacyId };
+    return { map, fountains, legacy: legacyId };
   };
 
   const fetchFileJson = async (fileId) => {
@@ -726,7 +765,7 @@ export default function Screenwriter() {
     return id;
   };
 
-  const uploadProject = async (folderId, id, d, prev) => {
+  const uploadProject = async (folderId, id, d, prev, asOf) => {
     /* the PATCH carries the name, so a legacy sw-<id>.json becomes a
        title-named .sws in place on its first push after this build */
     const j = await upsertRemote(folderId, prev && prev.fileId, swsFileName(d.title, id), JSON.stringify(swsEnvelope(id, d)), "application/json");
@@ -736,7 +775,12 @@ export default function Screenwriter() {
       const fj = await upsertRemote(bf, fountainId, fountainFileName(d.title, id), buildFountain(d), "text/plain");
       fountainId = fj.id;
     } catch {} // the backup is best-effort; its failure must not fail the sync
-    return { fileId: j.id, fountainId, modifiedTime: j.modifiedTime, syncedAt: Date.now() };
+    /* syncedAt is the edit-clock value this payload was built FROM, not the
+       time the upload finished: an edit landing mid-upload must stay dirty,
+       or it is stamped synced without ever having been sent. coreHash is the
+       content actually uploaded -- a mid-upload edit hashes differently and
+       stays dirty under the content check too. */
+    return { fileId: j.id, fountainId, modifiedTime: j.modifiedTime, syncedAt: asOf != null ? asOf : Date.now(), coreHash: syncHash(d) };
   };
 
   /* -- the one reconciliation routine: connect, the 60s tick, and "Sync now"
@@ -745,7 +789,11 @@ export default function Screenwriter() {
         as an entry in the Versions panel, so nothing is ever discarded. -- */
   const syncBusyRef = useRef(false);
   const syncProjects = async () => {
-    if (syncBusyRef.current || !tokenRef.current) return;
+    if (syncBusyRef.current) return;
+    /* throw rather than silently skip: every caller catches and surfaces
+       this, and a quiet no-op here is how a device writes all weekend
+       while pushing nothing */
+    if (!tokenRef.current) throw new Error("Signed out. Reconnect to sync.");
     syncBusyRef.current = true;
     try {
       const cfg = cloudRef.current;
@@ -761,23 +809,43 @@ export default function Screenwriter() {
         } catch { tombstones.push(t); }
       }
 
-      const { map: remote, fountains, legacyId } = await listRemote(folderId);
+      const { map: remote, fountains, legacy } = await listRemote(folderId);
       let lib = stateRef.current.library.slice();
       const docOf = (id) => (id === stateRef.current.currentId ? stateRef.current.doc : loadProjectDoc(id));
 
-      /* one-time import of the old monolithic screenwriter-sync.json; the file
-         itself is left in place as a fallback */
-      if (!Object.keys(remote).length && legacyId) {
-        const snap = await fetchFileJson(legacyId);
+      /* merge the old monolithic screenwriter-sync.json whenever it CHANGES,
+         not just once: a device still running a pre-split build keeps writing
+         it, and ignoring those writes silently drops that device's work.
+         Unknown scripts are adopted; known ones that differ get the monolith
+         copy stashed into their Versions panel -- recoverable, never live. */
+      let legacySeen = cfg.legacySeen || null;
+      if (legacy && legacy.modifiedTime !== legacySeen) {
+        const snap = await fetchFileJson(legacy.fileId);
         if (snap && snap.docs) {
           Object.entries(snap.docs).forEach(([id, d]) => {
-            if (lib.some((p) => p.id === id)) return; // local copy wins; it gets pushed below
             const md = migrateDoc(d);
-            saveProjectDoc(id, md);
-            const le = (snap.library || []).find((p) => p.id === id);
-            lib.push({ id, title: md.title || "UNTITLED", updatedAt: (le && le.updatedAt) || Date.now() });
+            const i = lib.findIndex((p) => p.id === id);
+            if (i < 0) {
+              saveProjectDoc(id, md);
+              const le = (snap.library || []).find((p) => p.id === id);
+              lib.push({ id, title: md.title || "UNTITLED", updatedAt: (le && le.updatedAt) || Date.now() });
+              return;
+            }
+            const cur = docOf(id) || DEFAULT_DOC();
+            if (docCore(cur) === docCore(md)) return;
+            const next = {
+              ...cur,
+              versions: [...mergeVersions(cur.versions, md.versions), docVersionOf(md, `From old-app backup ${new Date().toLocaleString()}`)],
+            };
+            saveProjectDoc(id, next);
+            lib[i] = { ...lib[i], updatedAt: Date.now() }; // dirty: the stash must reach Drive too
+            if (id === stateRef.current.currentId) {
+              skipSave.current = true;
+              setDoc(next); // versions only -- no version bump, the caret must not move
+            }
           });
         }
+        legacySeen = legacy.modifiedTime;
       }
 
       /* fountains live in the Fountain Backups subfolder now; this listing
@@ -791,21 +859,36 @@ export default function Screenwriter() {
         }
       }
 
-      const actions = planSync({ library: lib, bases: files, remote });
+      /* dirtiness comes from CONTENT, not timestamps. The mount autosave
+         stamps updatedAt on every app open, which made a stale device look
+         "edited": its old copy then won a conflict against newer remote
+         work, reverting it everywhere (the July weekend bug). */
+      const dirty = new Set();
+      for (const p of lib) {
+        const base = files[p.id];
+        const d = docOf(p.id);
+        if (!d) continue;
+        if (base && base.coreHash) { if (syncHash(d) !== base.coreHash) dirty.add(p.id); }
+        else if (p.updatedAt > ((base && base.syncedAt) || 0)) dirty.add(p.id); // bases from before coreHash existed
+      }
+
+      const actions = planSync({ library: lib, bases: files, remote, dirty });
       for (const a of actions) {
         const rem = remote[a.id];
         if (a.op === "push") {
           const d = docOf(a.id);
-          if (d) files[a.id] = await uploadProject(folderId, a.id, d, files[a.id]);
+          const loc = lib.find((p) => p.id === a.id);
+          if (d) files[a.id] = await uploadProject(folderId, a.id, d, files[a.id], loc && loc.updatedAt);
         } else if (a.op === "pull") {
           const entry = await fetchFileJson(rem.fileId);
           if (!entry || !entry.doc) continue;
           const md = migrateDoc(entry.doc);
           saveProjectDoc(a.id, md);
-          const le = { id: a.id, title: md.title || "UNTITLED", updatedAt: Date.now() };
+          const now = Date.now();
+          const le = { id: a.id, title: md.title || "UNTITLED", updatedAt: now };
           const i = lib.findIndex((p) => p.id === a.id);
           if (i >= 0) lib[i] = le; else lib.push(le);
-          files[a.id] = { fileId: rem.fileId, fountainId: (files[a.id] || {}).fountainId || null, modifiedTime: rem.modifiedTime, syncedAt: Date.now() };
+          files[a.id] = { fileId: rem.fileId, fountainId: (files[a.id] || {}).fountainId || null, modifiedTime: rem.modifiedTime, syncedAt: now, coreHash: syncHash(md) };
           if (a.id === stateRef.current.currentId) {
             skipSave.current = true;
             setDoc(md); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
@@ -824,7 +907,10 @@ export default function Screenwriter() {
             skipSave.current = true;
             setDoc(next); // no version bump: blocks are unchanged, the caret must not move
           }
-          files[a.id] = await uploadProject(folderId, a.id, next, { ...(files[a.id] || {}), fileId: rem.fileId });
+          files[a.id] = await uploadProject(
+            folderId, a.id, next, { ...(files[a.id] || {}), fileId: rem.fileId },
+            (lib.find((p) => p.id === a.id) || {}).updatedAt
+          );
         } else if (a.op === "removeLocal") {
           if (lib.length <= 1) { // never remove the last project; resurrect it instead
             const d = docOf(a.id);
@@ -844,7 +930,7 @@ export default function Screenwriter() {
 
       Object.keys(files).forEach((id) => { if (!lib.some((p) => p.id === id)) delete files[id]; });
       saveLibrary(lib); setLibrary(lib);
-      persistCloud({ ...cloudRef.current, folderId, files, tombstones, lastSyncedAt: Date.now() });
+      persistCloud({ ...cloudRef.current, folderId, files, tombstones, legacySeen, lastSyncedAt: Date.now() });
     } finally { syncBusyRef.current = false; }
   };
 
@@ -861,7 +947,13 @@ export default function Screenwriter() {
         scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email",
         callback: async (resp) => {
           if (resp.error) {
-            if (silentRef.current) { setCloudStatus("idle"); return; }
+            if (silentRef.current) {
+              /* a failed silent reconnect used to die invisibly ("idle") while
+                 the device quietly stopped syncing -- surface it */
+              setCloudStatus("error");
+              setCloudError("Drive session expired. Open the cloud menu and sign in again.");
+              return;
+            }
             setCloudStatus("error");
             setCloudError(resp.error === "access_denied" ? "Sign-in was cancelled." : resp.error);
             return;
@@ -903,15 +995,47 @@ export default function Screenwriter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const syncSoon = (err) => { setCloudStatus("error"); if (err && err.message) setCloudError(err.message); };
+
   useEffect(() => {
     if (!cloud.connected) return;
-    const t = setInterval(() => {
-      if (!tokenRef.current) return;
-      syncProjects().catch(() => setCloudStatus("error"));
-    }, 60000);
+    const t = setInterval(() => syncProjects().catch(syncSoon), 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloud.connected, cloud.clientId]);
+
+  /* edits reach Drive a few seconds after they settle instead of waiting for
+     the 60s tick -- writing for 45s and pocketing the phone used to push
+     nothing at all */
+  useEffect(() => {
+    const timer = { current: null };
+    scheduleQuickSyncRef.current = () => {
+      if (!cloudRef.current.connected || !tokenRef.current) return;
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => syncProjects().catch(syncSoon), 4000);
+    };
+    return () => { clearTimeout(timer.current); scheduleQuickSyncRef.current = () => {}; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* coming back to a suspended tab: the token refresh timer never fired while
+     the page slept, so revalidate on wake -- resync if the token is alive,
+     silently re-establish the session if it died */
+  useEffect(() => {
+    if (!cloud.connected) return;
+    let last = 0;
+    const wake = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - last < 10000) return;
+      last = Date.now();
+      if (tokenRef.current) syncProjects().catch(syncSoon);
+      else connectDrive(true);
+    };
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", wake);
+    return () => { window.removeEventListener("focus", wake); document.removeEventListener("visibilitychange", wake); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloud.connected]);
 
   const syncNow = async () => {
     if (!cloud.connected) return;
@@ -968,13 +1092,6 @@ export default function Screenwriter() {
     try { ws.send(s); } catch {}
   };
 
-  /* cheap content hash so a peer can say which state their copy grew from */
-  const hashStr = (s) => {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-    return String(h);
-  };
-
   /* lastKnownCore advances only when we APPLY or CONFIRM a peer's state --
      never on send. Having sent a copy is not agreement: the peer may never
      incorporate it, and treating it as agreed is how work gets destroyed. */
@@ -985,14 +1102,30 @@ export default function Screenwriter() {
 
   const applyRemote = (core, basedOn) => {
     const cur = stateRef.current.doc;
-    let next = { ...cur, ...core }; // versions stay local; cores travel
+    /* the wire is untrusted: take exactly the six content fields and nothing
+       else. A forged message must not be able to touch versions, the collab
+       key, or anything else the doc carries. */
+    const safe = {
+      title: String(core.title || "UNTITLED"), theme: core.theme || "",
+      treatment: core.treatment || "",
+      titlePage: core.titlePage || { byline: "", contact: "" },
+      characters: core.characters || {}, blocks: Array.isArray(core.blocks) ? core.blocks : [],
+    };
     /* fast-forward: the incoming copy grew from exactly our current state
-       (normal turn-taking). Anything else overwriting local changes stashes
-       them in the Versions panel first. */
+       (normal turn-taking). True divergence gets a permanent timestamped
+       stash. But EVERY apply keeps one rolling safety copy besides -- an
+       idle client trusting a forged fast-forward hash was a silent-overwrite
+       hole, and basedOn is attacker-controlled. The rolling copy is replaced
+       in place, so turn-taking does not grow the version list. */
+    const AUTO = "Live session safety copy (auto)";
     const fastForward = basedOn && basedOn === hashStr(docCore(cur));
+    let versions = cur.versions || [];
     if (!fastForward && docCore(cur) !== lastKnownCoreRef.current) {
-      next = { ...next, versions: [...(cur.versions || []), docVersionOf(cur, `Your copy before live update ${new Date().toLocaleString()}`)] };
+      versions = [...versions, docVersionOf(cur, `Your copy before live update ${new Date().toLocaleString()}`)];
+    } else {
+      versions = [...versions.filter((v) => v.name !== AUTO), docVersionOf(cur, AUTO)];
     }
+    const next = { ...cur, ...safe, versions };
     remoteApplyRef.current = true;
     skipSave.current = true;
     setDoc(next); setVersion((v) => v + 1); setTreatmentTick((t) => t + 1);
@@ -1038,7 +1171,10 @@ export default function Screenwriter() {
       if (closed) return;
       setCollabState("connecting");
       const name = encodeURIComponent((storage.api.getItem(COLLAB_NAME_KEY) || "Someone").slice(0, 40));
-      const sock = new WebSocket(`${COLLAB_URL}/room/sw-${currentId}?name=${name}`);
+      /* the room is id + secret: joining requires the collabKey that travels
+         inside the .sws, and rotating the key strands anyone holding an old
+         copy in a room nobody else will ever enter */
+      const sock = new WebSocket(`${COLLAB_URL}/room/sw-${currentId}${doc.collabKey ? "-" + doc.collabKey : ""}?name=${name}`);
       ws = sock;
       collabWS.current = sock;
       sock.onopen = () => {
@@ -1063,7 +1199,7 @@ export default function Screenwriter() {
       collabWS.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collabEnabled, currentId]);
+  }, [collabEnabled, currentId, doc.collabKey]);
 
   /* every local doc change: mark for the idle test, signal typing, and send
      the saved copy after the keystrokes settle */
@@ -1083,13 +1219,22 @@ export default function Screenwriter() {
       const name = (window.prompt("Name to show your collaborator:", storage.api.getItem(COLLAB_NAME_KEY) || "") || "").trim();
       if (!name) return;
       try { storage.api.setItem(COLLAB_NAME_KEY, name); } catch {}
+      if (!doc.collabKey) setDoc((d) => (d.collabKey ? d : { ...d, collabKey: genCollabKey() }));
     }
     setCollabMap((m) => {
       const n = { ...m };
       if (n[currentId]) delete n[currentId]; else n[currentId] = true;
-      try { storage.api.setItem(COLLAB_KEY, JSON.stringify(n)); } catch {}
-      return n;
+      return persistCollabMap(n);
     });
+  };
+  const persistCollabMap = (n) => {
+    try { storage.api.setItem(COLLAB_KEY, JSON.stringify(n)); } catch {}
+    return n;
+  };
+
+  const rotateCollabKey = () => {
+    if (!window.confirm("Reset live session access?\n\nThe session moves to a new private room. Anyone holding an old copy of the .sws can no longer join -- send your collaborator a fresh .sws to let them back in.")) return;
+    setDoc((d) => ({ ...d, collabKey: genCollabKey() }));
   };
 
   /* ---------------- board drag ---------------- */
@@ -1252,6 +1397,9 @@ export default function Screenwriter() {
                 </button>
                 {!pomo && <button className="menu-item" onClick={() => { setPomo({ phase: "work", remaining: 1500, running: true }); setMenuOpen(false); }}><Timer size={14} /> Focus timer (25 min)</button>}
                 <button className="menu-item" onClick={() => { setMenuOpen(false); editorRef.current && editorRef.current.toggleDual(); }}><Columns size={14} /> Toggle dual dialogue (⌘D)</button>
+                {doc.collabKey && (
+                  <button className="menu-item" onClick={() => { setMenuOpen(false); rotateCollabKey(); }}><Wifi size={14} /> Reset live session access</button>
+                )}
                 <div className="pop-label" style={{ marginTop: 12 }}>Title page</div>
                 <input className="pop-input" placeholder="Written by" value={(doc.titlePage && doc.titlePage.byline) || ""}
                   onChange={(e) => setDoc((d) => ({ ...d, titlePage: { ...(d.titlePage || {}), byline: e.target.value } }))} />
