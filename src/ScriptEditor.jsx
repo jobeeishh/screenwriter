@@ -241,10 +241,24 @@ const ScriptEditor = forwardRef(function ScriptEditor(
       const root = rootRef.current;
       const blk = root && (currentBlock(root) ||
         (lastBlkIdRef.current && root.querySelector(`[data-id="${lastBlkIdRef.current}"]`)));
-      if (!blk) return { type: null, before: "" };
+      if (!blk) return { type: null, before: "", id: null, cast: [] };
       const inCaret = currentBlock(root) === blk;
       const text = blk.textContent.replace(/\u00a0/g, " ");
-      return { type: blk.dataset.type, before: inCaret ? text.slice(0, caretOffset(blk)) : text };
+      return {
+        type: blk.dataset.type,
+        before: inCaret ? text.slice(0, caretOffset(blk)) : text,
+        id: blk.dataset.id,
+        cast: allCharacters(readBlocks(root)),
+      };
+    },
+    setReadingBlock(id) {
+      const root = rootRef.current;
+      if (!root) return;
+      root.querySelectorAll("[data-reading]").forEach((el) => delete el.dataset.reading);
+      if (id) {
+        const el = root.querySelector(`[data-id="${id}"]`);
+        if (el) { el.dataset.reading = "1"; el.scrollIntoView({ behavior: "smooth", block: "center" }); }
+      }
     },
     deleteBeforeCaret(n) {
       const root = rootRef.current;

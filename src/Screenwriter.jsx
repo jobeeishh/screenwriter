@@ -3,7 +3,7 @@ import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload, Clapperboard,
   Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText, History,
   RotateCcw, SeparatorHorizontal, Bold, List, Maximize2, CheckCircle2,
-  MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic,
+  MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic, Volume2,
 } from "lucide-react";
 import ScriptEditor from "./ScriptEditor.jsx";
 import {
@@ -11,7 +11,7 @@ import {
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
 } from "./engine.js";
 import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope, hashStr } from "./sync.js";
-import { createDictation } from "./dictation.js";
+import { createDictation, createReadback, buildReadbackPlan } from "./dictation.js";
 import { CSS } from "./styles.js";
 import { GOOGLE_CLIENT_ID, COLLAB_URL } from "./config.js";
 
@@ -1366,6 +1366,43 @@ export default function Screenwriter() {
     toggle: toggleDictation,
   };
 
+  /* ---------------- read-back (hear the scene aloud) ---------------- */
+  const [reading, setReading] = useState(false);
+  const readbackRef = useRef(null);
+  const readSupported = typeof window !== "undefined" && !!window.speechSynthesis;
+
+  const getReadback = () => {
+    if (readbackRef.current) return readbackRef.current;
+    readbackRef.current = createReadback({
+      onBlock: (id) => { if (editorRef.current) editorRef.current.setReadingBlock(id); },
+      onEnd: () => setReading(false),
+    });
+    return readbackRef.current;
+  };
+
+  /* read from the scene containing the caret to the next heading; with no
+     caret (or no headings), read the whole script */
+  const readScene = () => {
+    const ctx = editorRef.current ? editorRef.current.getContext() : {};
+    const blocks = doc.blocks || [];
+    let s = 0, e = blocks.length;
+    const ci = ctx.id ? blocks.findIndex((b) => b.id === ctx.id) : -1;
+    if (ci >= 0) {
+      s = ci;
+      while (s > 0 && blocks[s].type !== "heading") s--;
+      e = ci + 1;
+      while (e < blocks.length && blocks[e].type !== "heading") e++;
+    }
+    const plan = buildReadbackPlan(blocks.slice(s, e));
+    if (!plan.length) return;
+    getReadback().start(plan); // must run inside the tap handler on iOS
+    setReading(true);
+  };
+
+  const stopReading = () => { if (readbackRef.current) readbackRef.current.stop(); };
+  useEffect(() => { stopReading(); }, [currentId]); // switching scripts stops the voice
+  useEffect(() => () => stopReading(), []);
+
 
   /* ---------------- board drag ---------------- */
   const doMove = (from, to) => { if (from != null && to != null && from !== to) setBlocks(moveSceneBlocks(doc.blocks, from, to)); };
@@ -1545,6 +1582,11 @@ export default function Screenwriter() {
                     <Mic size={14} /> Voice commands: {dictSettings.commands ? "on" : "off"}
                   </button>
                 )}
+                {readSupported && (
+                  <button className="menu-item" onClick={() => { setMenuOpen(false); readScene(); }}>
+                    <Volume2 size={14} /> Read scene aloud
+                  </button>
+                )}
                 <div className="pop-label" style={{ marginTop: 12 }}>Title page</div>
                 <input className="pop-input" placeholder="Written by" value={(doc.titlePage && doc.titlePage.byline) || ""}
                   onChange={(e) => setDoc((d) => ({ ...d, titlePage: { ...(d.titlePage || {}), byline: e.target.value } }))} />
@@ -1662,6 +1704,13 @@ export default function Screenwriter() {
         )}
 
         <main className="editor-scroll">
+          {reading && (
+            <div className="read-bar">
+              <Volume2 size={14} />
+              <span>Reading aloud…</span>
+              <button onClick={stopReading}>Stop</button>
+            </div>
+          )}
           {remotePending && (
             <div className="collab-banner">
               <span><b>{remotePending.from}</b> made changes while you were typing.</span>

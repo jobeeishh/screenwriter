@@ -378,6 +378,21 @@ export const CSS = `
 .dict-interim { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-style: italic; color: var(--faint); }
 .mbar-mic { font-size: 15px; line-height: 1; }
 
+/* ---- read-back ---- */
+.read-bar {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 22;
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 14px; font-size: 12px; font-weight: 600;
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(20,20,15,.18); color: var(--accent);
+}
+.read-bar button {
+  border: none; border-radius: 999px; padding: 4px 12px;
+  font-size: 11px; font-weight: 600; background: var(--accent); color: #fff;
+}
+.blk[data-reading] { background: rgba(44,74,115,.10); border-radius: 3px; }
+.sw-root.night .blk[data-reading] { background: rgba(127,163,212,.16); }
+
 /* ---- mobile element bar ---- */
 .mbar {
   position: fixed; left: 0; right: 0; z-index: 20;

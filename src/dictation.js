@@ -95,6 +95,8 @@ function tokenize(words, o) {
 }
 
 /* ---------------- scene-heading sub-grammar ---------------- */
+const TIMES = new Set(["day", "night", "morning", "evening", "afternoon", "dusk", "dawn", "continuous", "later", "sunset", "sunrise"]);
+
 export function parseSlug(rest) {
   const words = splitWords(String(rest || "").toLowerCase().replace(/[.,!?]+$/, ""));
   if (!words.length) return "";
@@ -104,10 +106,9 @@ export function parseSlug(rest) {
   if (two === "interior exterior" || two === "inside outside") { prefix = "INT./EXT."; i = 2; }
   else if (/^(interior|inside|int)$/.test(words[0])) { prefix = "INT."; i = 1; }
   else if (/^(exterior|outside|ext)$/.test(words[0])) { prefix = "EXT."; i = 1; }
-  const TIME = new Set(["day", "night", "morning", "evening", "afternoon", "dusk", "dawn", "continuous", "later", "sunset", "sunrise"]);
   let time = "";
   let end = words.length;
-  if (end > i && TIME.has(words[end - 1])) {
+  if (end > i && TIMES.has(words[end - 1])) {
     time = words[end - 1].toUpperCase();
     end--;
     if (end > i && words[end - 1] === "at") end--; // "coffee shop at night"
@@ -115,6 +116,43 @@ export function parseSlug(rest) {
   const loc = words.slice(i, end).join(" ").toUpperCase();
   const head = [prefix, loc].filter(Boolean).join(" ");
   return head + (time ? (head ? " - " : "") + time : "");
+}
+
+/* ---------------- misheard-name snapping ---------------- */
+/* Recognition mangles invented names ("Zyla" -> "Isla"). When a dictated cue
+   is a near-miss of someone already in the cast, snap to the existing
+   spelling instead of inventing a second character. Thresholds tighten with
+   name length so short names never false-snap. */
+const levenshtein = (a, b) => {
+  if (a === b) return 0;
+  const m = a.length, n = b.length;
+  if (!m || !n) return m || n;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+};
+
+export function snapToCast(name, cast) {
+  const up = String(name || "").toUpperCase();
+  if (!cast || !cast.length || !up) return up;
+  if (cast.includes(up)) return up;
+  let best = null, bestD = Infinity;
+  for (const c of cast) {
+    const d = levenshtein(up, c);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  if (!best) return up;
+  /* only the explicit "character X" command calls this, so the words are
+     declared to be a name -- distance 2 on a 4-letter name is how "Zyla"
+     comes back as "Isla". The bare-name cue detection stays exact-match. */
+  const allow = best.length >= 4 ? 2 : best.length === 3 ? 1 : 0;
+  return bestD <= allow ? best : up;
 }
 
 /* ---------------- command tables ---------------- */
@@ -172,7 +210,7 @@ export function parseUtterance(raw, context = {}, opts = {}) {
         return { ops: [{ op: "newBlock", type, text: slug }], echo: `→ ${slug || "scene heading"}` };
       }
       if (type === "character") {
-        const name = rest.toUpperCase().replace(/[.,!?]+$/, "");
+        const name = snapToCast(rest.replace(/[.,!?]+$/, ""), context.cast);
         return { ops: [{ op: "newBlock", type, text: name }], echo: `→ character${name ? ": " + name : ""}` };
       }
       if (type === "parenthetical") {
@@ -184,6 +222,25 @@ export function parseUtterance(raw, context = {}, opts = {}) {
       const ops = [{ op: "newBlock", type, text: "" }];
       if (tail.length && tail[0].op === "text") { ops[0].text = tail[0].text; tail.shift(); }
       return { ops: [...ops, ...tail], echo: `→ ${type}` };
+    }
+
+    /* -- smart detections: deliberately narrow, both double-gated -- */
+    const w = splitWords(lower);
+    /* a bare slug spoken without "scene heading": must START like one AND
+       end on a time-of-day word. "Interior decorating is my passion" fails
+       the second gate and stays dialogue. */
+    const slugStart = /^(interior|exterior|int|ext)$/.test(w[0]) || w.slice(0, 2).join(" ") === "interior exterior";
+    if (slugStart && w.length >= 2 && TIMES.has(w[w.length - 1])) {
+      const slug = parseSlug(stripped);
+      return { ops: [{ op: "newBlock", type: "heading", text: slug }], echo: `→ ${slug}` };
+    }
+    /* an utterance that IS a known character's name is a cue switch --
+       gated on the name already existing in the script, and never while
+       naming an empty cue (those words ARE the name being given) */
+    const namingCue = context.type === "character" && !(context.before || "").trim();
+    const asName = stripped.toUpperCase();
+    if (!namingCue && context.cast && context.cast.includes(asName)) {
+      return { ops: [{ op: "newBlock", type: "character", text: asName }], echo: `→ character: ${asName}` };
     }
   }
 
@@ -210,6 +267,101 @@ export function parseUtterance(raw, context = {}, opts = {}) {
     ops[0] = { ...ops[0], text: " " + ops[0].text };
   }
   return { ops, echo: "" };
+}
+
+/* ---------------- read-back: script -> spoken plan ----------------
+   One utterance per block, so the UI can highlight and follow along.
+   Dialogue gets a per-character pitch derived from the speaker's name --
+   a two-hander actually sounds like two voices. Pure and node-testable. */
+export function pitchFor(name) {
+  let h = 0;
+  const n = String(name || "").toUpperCase();
+  for (let i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) | 0;
+  return 0.85 + (Math.abs(h) % 9) * 0.05; // 0.85 .. 1.25
+}
+
+export function buildReadbackPlan(blocks) {
+  const plan = [];
+  let speaker = null;
+  for (const b of blocks || []) {
+    const t = String(b.text || "").trim();
+    if (!t) continue;
+    if (b.type === "character") {
+      speaker = t.replace(/\(.*?\)/g, "").trim(); // MARY (V.O.) -> MARY
+      plan.push({ id: b.id, kind: "cue", text: speaker + ".", rate: 1.15, pitch: 1 });
+    } else if (b.type === "dialogue") {
+      plan.push({ id: b.id, kind: "dialogue", text: t, rate: 1, pitch: pitchFor(speaker) });
+    } else if (b.type === "parenthetical") {
+      plan.push({ id: b.id, kind: "paren", text: t.replace(/[()]/g, ""), rate: 1.15, pitch: 0.95 });
+    } else if (b.type === "heading") {
+      speaker = null;
+      const spoken = t
+        .replace(/\bINT\.\/EXT\.?\s*/i, "Interior, exterior: ")
+        .replace(/\bINT\.?\s+/i, "Interior: ")
+        .replace(/\bEXT\.?\s+/i, "Exterior: ")
+        .replace(/\s+-\s+/g, ", ");
+      plan.push({ id: b.id, kind: "heading", text: spoken, rate: 1.05, pitch: 0.85 });
+    } else if (b.type === "transition") {
+      speaker = null;
+      plan.push({ id: b.id, kind: "transition", text: t.replace(/:$/, "").toLowerCase(), rate: 1.1, pitch: 0.85 });
+    } else {
+      speaker = null;
+      plan.push({ id: b.id, kind: "action", text: t, rate: 1.05, pitch: 1 });
+    }
+  }
+  return plan;
+}
+
+export function createReadback({ onBlock, onEnd }) {
+  const supported = typeof window !== "undefined" && !!window.speechSynthesis;
+  let playing = false;
+  let tick = null;
+
+  const pickVoice = () => {
+    const vs = window.speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang));
+    return (
+      vs.find((v) => /natural|neural|premium|enhanced|siri/i.test(v.name)) ||
+      vs.find((v) => /samantha|aria|jenny|google us english/i.test(v.name)) ||
+      vs[0] || null
+    );
+  };
+
+  const stop = () => {
+    if (!playing) return;
+    playing = false;
+    clearInterval(tick);
+    try { window.speechSynthesis.cancel(); } catch {}
+    onBlock(null);
+    if (onEnd) onEnd();
+  };
+
+  const start = (plan) => {
+    if (!supported || !plan.length) return;
+    try { window.speechSynthesis.cancel(); } catch {}
+    playing = true;
+    const voice = pickVoice(); // may be null while voices load; default is fine
+    let i = 0;
+    const next = () => {
+      if (!playing) return;
+      if (i >= plan.length) { stop(); return; }
+      const p = plan[i++];
+      const u = new window.SpeechSynthesisUtterance(p.text);
+      if (voice) u.voice = voice;
+      u.rate = p.rate;
+      u.pitch = p.pitch;
+      u.onstart = () => { if (playing) onBlock(p.id); };
+      u.onend = next;
+      u.onerror = next;
+      window.speechSynthesis.speak(u);
+    };
+    next();
+    /* some engines quietly pause mid-queue; nudge them while playing */
+    tick = setInterval(() => {
+      try { if (playing && window.speechSynthesis.paused) window.speechSynthesis.resume(); } catch {}
+    }, 4000);
+  };
+
+  return { supported, start, stop, playing: () => playing };
 }
 
 /* ---------------- SpeechRecognition wrapper ---------------- */
