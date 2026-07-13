@@ -675,6 +675,7 @@ export default function Screenwriter() {
   const tokenRef = useRef(null);
   const tokenClientRef = useRef(null);
   const silentRef = useRef(false);
+  const authWatchRef = useRef(null); // deadline for a sign-in attempt that never calls back
   const refreshRef = useRef(null);
   const cloudRef = useRef(cloud); cloudRef.current = cloud;
   const stateRef = useRef(); stateRef.current = { library, doc, currentId };
@@ -982,6 +983,7 @@ export default function Screenwriter() {
         scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email",
         callback: async (resp) => {
           if (resp.error) {
+            clearTimeout(authWatchRef.current);
             if (silentRef.current) {
               /* a failed silent reconnect used to die invisibly ("idle") while
                  the device quietly stopped syncing -- surface it */
@@ -993,6 +995,7 @@ export default function Screenwriter() {
             setCloudError(resp.error === "access_denied" ? "Sign-in was cancelled." : resp.error);
             return;
           }
+          clearTimeout(authWatchRef.current);
           tokenRef.current = resp.access_token;
           if (refreshRef.current) clearTimeout(refreshRef.current);
           refreshRef.current = setTimeout(() => {
@@ -1020,6 +1023,16 @@ export default function Screenwriter() {
       tokenClientRef.current = client;
     }
     tokenClientRef.current.requestAccessToken({ prompt: silent || sessionEmail ? "" : "consent" });
+    /* GIS never calls back at all when its popup cannot open (blocked, or no
+       Google session) -- the exact failure iOS produces. Silence past this
+       deadline IS the answer: the session is gone and only a tap can fix it. */
+    clearTimeout(authWatchRef.current);
+    authWatchRef.current = setTimeout(() => {
+      if (!tokenRef.current) {
+        setCloudStatus("error");
+        setCloudError("Drive session expired. Tap to reconnect.");
+      }
+    }, 8000);
   };
 
   useEffect(() => {
@@ -1088,6 +1101,12 @@ export default function Screenwriter() {
   };
 
   const notSynced = cloud.connected && (!sessionEmail || cloudStatus === "error");
+  /* sync is supposed to be on but there is no living session: the silent
+     reconnect failed (iOS blocks it routinely) or the token died mid-session.
+     Only a tap can fix it -- the popup needs a user gesture -- so say so
+     loudly instead of hiding a red dot in the toolbar. */
+  const authLost = cloud.connected && cloudStatus === "error" &&
+    (!sessionEmail || /signed out|session expired/i.test(cloudError || ""));
 
   /* ---------------- live session (presence + handoff) ----------------
      Opt-in per script. One WebSocket room per script id (collab/ worker);
@@ -1704,6 +1723,11 @@ export default function Screenwriter() {
         )}
 
         <main className="editor-scroll">
+          {authLost && (
+            <button className="reauth-pill" onClick={() => connectDrive(false)}>
+              <CloudOff size={13} /> Sync is signed out — tap to reconnect
+            </button>
+          )}
           {reading && (
             <div className="read-bar">
               <Volume2 size={14} />

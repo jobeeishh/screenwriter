@@ -378,6 +378,17 @@ export const CSS = `
 .dict-interim { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-style: italic; color: var(--faint); }
 .mbar-mic { font-size: 15px; line-height: 1; }
 
+/* ---- sync reauth pill ---- */
+.reauth-pill {
+  position: sticky; top: 8px; z-index: 7;
+  display: flex; align-items: center; gap: 7px;
+  margin: 8px auto -14px; padding: 7px 14px;
+  font-size: 12px; font-weight: 600; font-family: inherit;
+  background: #B4453B; color: #fff; border: none; border-radius: 999px;
+  box-shadow: 0 6px 18px rgba(180,69,59,.3); cursor: pointer;
+}
+.reauth-pill:hover { filter: brightness(1.08); }
+
 /* ---- read-back ---- */
 .read-bar {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 22;
