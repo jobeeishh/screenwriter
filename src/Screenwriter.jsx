@@ -1209,9 +1209,14 @@ export default function Screenwriter() {
     if (m.type === "join") { setPeers((p) => [...p, m.name]); sendDocNow(); return; } // newcomer gets our copy
     if (m.type === "leave") {
       setPeers((p) => { const i = p.indexOf(m.name); return i < 0 ? p : [...p.slice(0, i), ...p.slice(i + 1)]; });
+      if (editorRef.current) editorRef.current.setPeerCaret({ name: m.name, blkId: null });
       return;
     }
     if (m.type === "sync-request") { sendDocNow(); return; }
+    if (m.type === "caret") {
+      if (editorRef.current) editorRef.current.setPeerCaret({ name: m.from || "Someone", blkId: m.blkId, off: m.off });
+      return;
+    }
     if (m.type === "editing") {
       setPeerTyping(m.from || "Someone");
       clearTimeout(typingClearRef.current);
@@ -1234,6 +1239,7 @@ export default function Screenwriter() {
   useEffect(() => {
     if (!collabEnabled) {
       setCollabState("off"); setPeers([]); setPeerTyping(""); setRemotePending(null);
+      if (editorRef.current) editorRef.current.setPeerCaret(null);
       return;
     }
     let closed = false;
@@ -1761,7 +1767,10 @@ export default function Screenwriter() {
               </div>
             ))}
 
-            <ScriptEditor ref={editorRef} blocks={doc.blocks} version={version} onChange={onEditorChange} night={night} dict={dictProp} />
+            <ScriptEditor
+              ref={editorRef} blocks={doc.blocks} version={version} onChange={onEditorChange} night={night} dict={dictProp}
+              onCaretMove={collabEnabled ? (blkId, off) => sendWS({ type: "caret", blkId, off }) : null}
+            />
           </div>
           <div className="hint-bar">
             enter&thinsp;next element &nbsp;&middot;&nbsp; tab&thinsp;change type &nbsp;&middot;&nbsp; ⌘D&thinsp;dual dialogue &nbsp;&middot;&nbsp; ⌘Z&thinsp;undo

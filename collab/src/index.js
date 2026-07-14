@@ -57,6 +57,7 @@ export class Room extends DurableObject {
       case "doc":          // a saved copy of the script: fan out to peers
       case "editing":      // typing indicator
       case "sync-request": // newcomer asking peers for the latest copy
+      case "caret":        // live cursor position {blkId, off}
         this.broadcast(ws, JSON.stringify({ ...msg, from }));
         break;
       default:

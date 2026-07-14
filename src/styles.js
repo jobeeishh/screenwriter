@@ -378,6 +378,22 @@ export const CSS = `
 .dict-interim { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-style: italic; color: var(--faint); }
 .mbar-mic { font-size: 15px; line-height: 1; }
 
+/* ---- peer cursors (live sessions) ---- */
+.peer-caret {
+  position: absolute; top: 0; left: 0; width: 2px; height: 17px;
+  background: hsl(var(--pc), 65%, 45%);
+  pointer-events: none; z-index: 5; display: none;
+  transition: transform .15s ease-out;
+}
+.peer-caret-flag {
+  position: absolute; top: -13px; left: -2px;
+  padding: 1px 6px; border-radius: 4px 4px 4px 0;
+  font-family: 'Jost', system-ui, sans-serif; font-size: 9px; font-weight: 600;
+  color: #fff; background: hsl(var(--pc), 65%, 45%); white-space: nowrap;
+}
+.sw-root.night .peer-caret, .sw-root.night .peer-caret-flag { background: hsl(var(--pc), 60%, 60%); }
+.sw-root.night .peer-caret-flag { color: #10131A; }
+
 /* ---- sync reauth pill ---- */
 .reauth-pill {
   position: sticky; top: 8px; z-index: 7;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 import {
   HEADING_RE, NEXT_TYPE, TYPE_CYCLE, CHAR_EXTENSIONS,
   buildHTML, readBlocks, needsContd, priorSpeakers, allCharacters,
@@ -75,6 +75,14 @@ const setType = (blk, type) => {
 
 const isInDual = (blk) => blk.parentNode && blk.parentNode.classList.contains("dual-col");
 
+/* a stable hue per collaborator name, for their cursor */
+const hueFor = (name) => {
+  let h = 0;
+  const s = String(name || "");
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h) % 360;
+};
+
 /* ------------------------------------------------- mobile element bar ----- */
 /* iOS has no Tab key, so the type cycle that `Tab` drives on desktop is
    unreachable by touch. The bar makes the same TYPE_CYCLE tappable. */
@@ -103,7 +111,7 @@ const scrollParent = (node) => {
 
 /* =========================================================================== */
 const ScriptEditor = forwardRef(function ScriptEditor(
-  { blocks, version, onChange, onCaretBlock, night, dict },
+  { blocks, version, onChange, onCaretBlock, night, dict, onCaretMove },
   ref
 ) {
   const rootRef = useRef(null);
@@ -123,6 +131,11 @@ const ScriptEditor = forwardRef(function ScriptEditor(
   const barRef = useRef(null);
   const caretCbRef = useRef(onCaretBlock);
   caretCbRef.current = onCaretBlock;
+  const onCaretMoveRef = useRef(onCaretMove);
+  onCaretMoveRef.current = onCaretMove;
+  const caretSentAtRef = useRef(0);
+  /* peer cursors (live sessions): name -> { blkId, off } */
+  const [peerCarets, setPeerCarets] = useState({});
 
   /* ---------------- write DOM (only on version change) ---------------- */
   useEffect(() => {
@@ -251,6 +264,18 @@ const ScriptEditor = forwardRef(function ScriptEditor(
         cast: allCharacters(readBlocks(root)),
       };
     },
+    /* live sessions: place/remove a collaborator's cursor.
+       null clears all; { name, blkId: null } clears one peer. */
+    setPeerCaret(p) {
+      if (p === null) { setPeerCarets({}); return; }
+      setPeerCarets((m) => {
+        if (p.blkId == null) {
+          if (!(p.name in m)) return m;
+          const n = { ...m }; delete n[p.name]; return n;
+        }
+        return { ...m, [p.name]: { blkId: p.blkId, off: p.off || 0 } };
+      });
+    },
     setReadingBlock(id) {
       const root = rootRef.current;
       if (!root) return;
@@ -373,6 +398,11 @@ const ScriptEditor = forwardRef(function ScriptEditor(
           setCaretType(blk.dataset.type);
           setCaretDual(isInDual(blk));
           if (caretCbRef.current) caretCbRef.current(blk.dataset.id, blk.dataset.type);
+          /* live sessions: tell the peer where we are (throttled) */
+          if (onCaretMoveRef.current && Date.now() - caretSentAtRef.current > 350) {
+            caretSentAtRef.current = Date.now();
+            onCaretMoveRef.current(blk.dataset.id, caretOffset(blk));
+          }
         }
         if (blk && blk.dataset.type === "character") openMenuFor(blk);
         else closeMenu();
@@ -382,6 +412,39 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     return () => { document.removeEventListener("selectionchange", onSelChange); if (raf) cancelAnimationFrame(raf); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* ---------------- peer cursors ---------------- */
+  /* Overlay only: measured with a collapsed Range, positioned absolutely in
+     .editor-host. Never touches the text nodes, so the caret contract holds.
+     Repositions whenever content or the caret data changes; a missing block
+     (peer ahead of our copy) hides the flag until the next update. */
+  const hostRef = useRef(null);
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    const root = rootRef.current;
+    if (!host || !root) return;
+    Object.entries(peerCarets).forEach(([name, c]) => {
+      const el = host.querySelector(`.peer-caret[data-peer="${CSS.escape(name)}"]`);
+      if (!el) return;
+      const blk = root.querySelector(`[data-id="${c.blkId}"]`);
+      if (!blk) { el.style.display = "none"; return; }
+      const t = blk.firstChild && blk.firstChild.nodeType === 3 ? blk.firstChild : null;
+      const r = document.createRange();
+      if (t) {
+        const off = Math.max(0, Math.min(c.off, t.length));
+        r.setStart(t, off);
+      } else {
+        r.selectNodeContents(blk);
+      }
+      r.collapse(true);
+      let rect = r.getBoundingClientRect();
+      if (!rect.height && !rect.top) rect = blk.getBoundingClientRect();
+      const h = host.getBoundingClientRect();
+      el.style.display = "block";
+      el.style.transform = `translate(${rect.left - h.left}px, ${rect.top - h.top}px)`;
+      el.style.height = `${rect.height || 17}px`;
+    });
+  }, [peerCarets, version, blocks]);
 
   /* ---------------- mobile element bar ---------------- */
   /* The visual viewport shrinks to the space above the software keyboard, so
@@ -611,7 +674,12 @@ const ScriptEditor = forwardRef(function ScriptEditor(
   const onBlur = () => setTimeout(() => { closeMenu(); setEditing(false); }, 150);
 
   return (
-    <div className="editor-host">
+    <div className="editor-host" ref={hostRef}>
+      {Object.keys(peerCarets).map((name) => (
+        <div key={name} className="peer-caret" data-peer={name} style={{ "--pc": hueFor(name) }}>
+          <span className="peer-caret-flag">{name}</span>
+        </div>
+      ))}
       <div
         ref={rootRef}
         className="page-body"

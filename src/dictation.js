@@ -20,6 +20,11 @@
 
 const splitWords = (s) => String(s).split(/\s+/).filter(Boolean);
 
+/* iOS auto-punctuates transcripts: "character Joseph" arrives as
+   "Character, Joseph." -- names and slugs must shed ALL punctuation,
+   not just the trailing kind */
+const cleanName = (s) => String(s).replace(/[.,!?;:]+/g, " ").replace(/\s+/g, " ").trim();
+
 /* ---------------- punctuation & control words (always active) ------------- */
 /* kind: "after" attaches to the preceding word; "open" attaches the NEXT
    word to itself; "dash" floats with spaces; "enter"/"para" are structural */
@@ -98,7 +103,7 @@ function tokenize(words, o) {
 const TIMES = new Set(["day", "night", "morning", "evening", "afternoon", "dusk", "dawn", "continuous", "later", "sunset", "sunrise"]);
 
 export function parseSlug(rest) {
-  const words = splitWords(String(rest || "").toLowerCase().replace(/[.,!?]+$/, ""));
+  const words = splitWords(cleanName(String(rest || "")).toLowerCase());
   if (!words.length) return "";
   let i = 0;
   let prefix = "";
@@ -210,11 +215,11 @@ export function parseUtterance(raw, context = {}, opts = {}) {
         return { ops: [{ op: "newBlock", type, text: slug }], echo: `→ ${slug || "scene heading"}` };
       }
       if (type === "character") {
-        const name = snapToCast(rest.replace(/[.,!?]+$/, ""), context.cast);
+        const name = snapToCast(cleanName(rest), context.cast);
         return { ops: [{ op: "newBlock", type, text: name }], echo: `→ character${name ? ": " + name : ""}` };
       }
       if (type === "parenthetical") {
-        const body = rest.toLowerCase().replace(/[.,!?]+$/, "");
+        const body = cleanName(rest).toLowerCase();
         return { ops: [{ op: "newBlock", type, text: body ? `(${body})` : "" }], echo: "→ parenthetical" };
       }
       /* action / dialogue: the remainder is the new block's opening text */
@@ -236,11 +241,17 @@ export function parseUtterance(raw, context = {}, opts = {}) {
     }
     /* an utterance that IS a known character's name is a cue switch --
        gated on the name already existing in the script, and never while
-       naming an empty cue (those words ARE the name being given) */
+       naming an empty cue (those words ARE the name being given).
+       Snapped, not exact: recognition mishears invented names, and a whole
+       short utterance that lands within snapping distance of a cast member
+       was that name. The command echo makes any misfire visible. */
     const namingCue = context.type === "character" && !(context.before || "").trim();
-    const asName = stripped.toUpperCase();
-    if (!namingCue && context.cast && context.cast.includes(asName)) {
-      return { ops: [{ op: "newBlock", type: "character", text: asName }], echo: `→ character: ${asName}` };
+    const asName = cleanName(stripped).toUpperCase();
+    if (!namingCue && context.cast && asName && w.length <= 3) {
+      const snapped = snapToCast(asName, context.cast);
+      if (context.cast.includes(snapped)) {
+        return { ops: [{ op: "newBlock", type: "character", text: snapped }], echo: `→ character: ${snapped}` };
+      }
     }
   }
 
