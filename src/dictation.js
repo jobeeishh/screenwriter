@@ -255,21 +255,25 @@ export function parseUtterance(raw, context = {}, opts = {}) {
     }
   }
 
-  /* speech landing on a character cue that already has a name is the start
-     of that character's dialogue -- open a dialogue block first, the way
-     Enter does after a cue. An empty cue instead takes the words as its
-     name (someone who said "character" and the name as separate utterances). */
-  const toDialogue = context.type === "character" && (context.before || "").trim();
-  const effType = toDialogue ? "dialogue" : context.type;
+  /* speech landing on a block that "completes" with one line rolls into the
+     element that naturally follows it, the way Enter does:
+       filled character cue -> dialogue
+       filled scene heading -> action (so you don't have to say "action")
+       filled transition    -> action
+     An EMPTY such block instead takes the words as its own text (someone who
+     said "character"/"scene heading" and the body as separate utterances). */
+  const NEXT_AFTER = { character: "dialogue", heading: "action", transition: "action" };
+  const rollTo = ((context.before || "").trim() && NEXT_AFTER[context.type]) || null;
+  const effType = rollTo || context.type;
 
   /* plain content: punctuation words and "new line" stay active even with
      commands off -- they misfire far less than element words do */
   const upperAll = effType === "character" || effType === "heading" || effType === "transition";
-  const capNext = autoCap && (toDialogue || !context.before || /(^|[.!?…]["')\]]?)\s*$/.test(context.before));
+  const capNext = autoCap && (rollTo || !context.before || /(^|[.!?…]["')\]]?)\s*$/.test(context.before));
   const ops = tokenize(splitWords(text), { capNext, upperAll, autoCap });
 
-  if (toDialogue) {
-    const lead = { op: "newBlock", type: "dialogue", text: "" };
+  if (rollTo) {
+    const lead = { op: "newBlock", type: rollTo, text: "" };
     if (ops.length && ops[0].op === "text") { lead.text = ops[0].text; ops.shift(); }
     return { ops: [lead, ...ops], echo: "" };
   }

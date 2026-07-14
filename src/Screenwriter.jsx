@@ -40,6 +40,7 @@ const CLOUD_KEY = "screenwriter-cloud-v1";
 const COLLAB_KEY = "screenwriter-collab-v1";
 const COLLAB_NAME_KEY = "screenwriter-collab-name";
 const DICT_KEY = "screenwriter-dictation-v1";
+const TOKEN_KEY = "screenwriter-drive-token";
 const OLD_KEY = "screenwriter-doc-v1";
 const docKey = (id) => `screenwriter-doc-v1:${id}`;
 
@@ -682,14 +683,34 @@ export default function Screenwriter() {
 
   const persistCloud = (n) => { setCloud(n); try { storage.api.setItem(CLOUD_KEY, JSON.stringify(n)); } catch {} };
 
+  /* Persist the access token (with its expiry) so a reload -- every deploy is
+     one, and iOS evicts backgrounded tabs constantly -- can resume syncing
+     with the token it already has, instead of a fresh sign-in each time.
+     Google access tokens die after ~1h regardless; this is scoped to
+     drive.file + email and never leaves the device except back to Google. */
+  const saveToken = (accessToken, expiresInSec) => {
+    tokenRef.current = accessToken;
+    const rec = { t: accessToken, exp: Date.now() + (Number(expiresInSec) || 3600) * 1000 };
+    try { storage.api.setItem(TOKEN_KEY, JSON.stringify(rec)); } catch {}
+    return rec.exp;
+  };
+  const loadToken = () => {
+    try {
+      const r = JSON.parse(storage.api.getItem(TOKEN_KEY) || "null");
+      if (r && r.t && r.exp - Date.now() > 60000) return r; // >1min of life left
+    } catch {}
+    return null;
+  };
+  const clearToken = () => { tokenRef.current = null; try { storage.api.removeItem(TOKEN_KEY); } catch {} };
+
   const driveFetch = async (url, opts = {}) => {
     if (!tokenRef.current) throw new Error("Signed out. Reconnect to sync.");
     const res = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${tokenRef.current}` } });
     if (res.status === 401) {
-      /* the token is dead (they last ~1h; the 50-min refresh timer freezes
-         when the tab is backgrounded). Null it so the wake handler knows to
-         re-establish the session rather than keep failing with it. */
-      tokenRef.current = null;
+      /* the token is dead (they last ~1h; the refresh timer freezes when the
+         tab is backgrounded). Clear it -- including the stored copy -- so the
+         wake handler re-establishes the session rather than reusing a corpse. */
+      clearToken();
       throw new Error("Signed out. Reconnect to sync.");
     }
     if (!res.ok) throw new Error(`Drive said ${res.status}`);
@@ -996,12 +1017,14 @@ export default function Screenwriter() {
             return;
           }
           clearTimeout(authWatchRef.current);
-          tokenRef.current = resp.access_token;
+          const exp = saveToken(resp.access_token, resp.expires_in);
           if (refreshRef.current) clearTimeout(refreshRef.current);
+          /* refresh a minute before the token actually dies, not on a fixed
+             50min guess */
           refreshRef.current = setTimeout(() => {
             silentRef.current = true;
             try { tokenClientRef.current.requestAccessToken({ prompt: "" }); } catch {}
-          }, 50 * 60 * 1000);
+          }, Math.max(30000, exp - Date.now() - 60000));
 
           setCloudStatus("syncing");
           try {
@@ -1038,6 +1061,20 @@ export default function Screenwriter() {
   useEffect(() => {
     if (!cloud.connected) return;
     if (!(GOOGLE_CLIENT_ID || cloud.clientId)) return;
+    /* a still-valid token from a previous load resumes syncing with no
+       sign-in at all -- the whole point of persisting it */
+    const rec = loadToken();
+    if (rec) {
+      tokenRef.current = rec.t;
+      setSessionEmail(cloud.email || "signed in");
+      setCloudStatus("syncing");
+      refreshRef.current = setTimeout(() => {
+        silentRef.current = true;
+        try { if (tokenClientRef.current) tokenClientRef.current.requestAccessToken({ prompt: "" }); else connectDrive(true); } catch {}
+      }, Math.max(30000, rec.exp - Date.now() - 60000));
+      syncProjects().then(() => setCloudStatus("ok")).catch(syncSoon);
+      return () => { if (refreshRef.current) clearTimeout(refreshRef.current); };
+    }
     const t = setTimeout(() => connectDrive(true), 900);
     return () => { clearTimeout(t); if (refreshRef.current) clearTimeout(refreshRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1097,7 +1134,7 @@ export default function Screenwriter() {
   const disconnectCloud = () => {
     try { if (tokenRef.current && window.google) window.google.accounts.oauth2.revoke(tokenRef.current); } catch {}
     persistCloud({ ...cloud, connected: false });
-    tokenRef.current = null; setSessionEmail(""); setCloudStatus("idle");
+    clearToken(); setSessionEmail(""); setCloudStatus("idle");
   };
 
   const notSynced = cloud.connected && (!sessionEmail || cloudStatus === "error");

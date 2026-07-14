@@ -464,14 +464,23 @@ export const CSS = `
 }
 
 @media (max-width: 700px) {
-  .sw-root { --topbar-h: 92px; }
-  .topbar { display: flex; flex-wrap: wrap; height: auto; min-height: 92px; padding: 6px 10px; row-gap: 4px; column-gap: 6px; }
-  .tb-left { flex: 1; min-width: 0; }
-  .tb-right { flex: 0 0 auto; margin-left: auto; }
-  .theme-strip { order: 3; width: 100%; }
+  /* three stacked rows so nothing gets crushed: title, theme, then the
+     tool buttons on their own full-width line (they alone exceed a phone's
+     width). The button row scrolls horizontally as a safety valve on the
+     narrowest devices rather than overlapping. */
+  .sw-root { --topbar-h: 128px; }
+  .topbar { display: flex; flex-wrap: wrap; height: auto; min-height: var(--topbar-h); padding: 6px 10px; row-gap: 5px; column-gap: 6px; }
+  .tb-left { order: 1; flex: 1 0 100%; min-width: 0; }
+  .theme-strip { order: 2; width: 100%; }
+  .tb-right {
+    order: 3; flex: 1 0 100%; margin-left: 0; justify-content: flex-start;
+    overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  .tb-right::-webkit-scrollbar { display: none; }
+  .tb-right > * { flex: 0 0 auto; }
   .title-input { flex: 1; width: auto; min-width: 40px; font-size: 11px; }
-  .save-word, .streak-chip, .page-est, .sync-warn, .collab-chip { display: none; }
-  .icon-btn { width: 28px; height: 28px; }
+  .save-word, .streak-chip, .page-est, .sync-warn, .collab-chip, .pomo-chip { display: none; }
+  .icon-btn { width: 30px; height: 30px; }
   .export-btn { padding: 5px 9px; font-size: 11px; }
   .pop-panel { position: fixed; left: 10px; right: 10px; top: var(--topbar-h); width: auto; }
 }
