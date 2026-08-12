@@ -2,13 +2,14 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload, Clapperboard,
   Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText, History,
-  RotateCcw, SeparatorHorizontal, Bold, List, Maximize2, CheckCircle2,
+  RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2,
   MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic, Volume2,
 } from "lucide-react";
 import ScriptEditor from "./ScriptEditor.jsx";
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
+  plainText,
 } from "./engine.js";
 import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope, hashStr } from "./sync.js";
 import { createDictation, createReadback, buildReadbackPlan } from "./dictation.js";
@@ -105,6 +106,26 @@ const docVersionOf = (d, vname) => ({
    rotations must all reach Drive even though docCore ignores them
    (version entries are immutable, so ids suffice) */
 const syncHash = (d) => hashStr(docCore(d) + "|" + (d.versions || []).map((v) => v.id).join(",") + "|" + (d.collabKey || ""));
+
+/* The treatment editor is a contentEditable that stores whatever HTML gets
+   pasted in. Word/Docs/web pastes carry inline color styles (e.g. black text),
+   which override our themed var(--text) and stay dark on the night-mode panel,
+   unreadable. The toolbar offers no color control, so any inline color is
+   unwanted paste residue -- strip it so the text follows the theme in both
+   modes. Text content is untouched. */
+function stripInlineColor(html) {
+  if (!html || !/[<>]/.test(html)) return html;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  tpl.content.querySelectorAll("[style]").forEach((el) => {
+    el.style.removeProperty("color");
+    el.style.removeProperty("background");
+    el.style.removeProperty("background-color");
+    if (!el.getAttribute("style")) el.removeAttribute("style");
+  });
+  tpl.content.querySelectorAll("font[color]").forEach((el) => el.removeAttribute("color"));
+  return tpl.innerHTML;
+}
 
 function timeAgo(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -618,6 +639,7 @@ export default function Screenwriter() {
       html = html.split("\n").map((s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")).join("<br>");
     }
     html = html.replace(/<script[\s\S]*?<\/script>/gi, "");
+    html = stripInlineColor(html);
     if (el.innerHTML !== html) el.innerHTML = html;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [treatmentOpen, currentId, treatmentTick]);
@@ -1470,9 +1492,10 @@ export default function Screenwriter() {
   const doMove = (from, to) => { if (from != null && to != null && from !== to) setBlocks(moveSceneBlocks(doc.blocks, from, to)); };
 
   const sceneSnippet = (s) => {
-    const b = s.blocks.find((x) => x.text.trim());
+    /* the board shows words, not markers */
+    const b = s.blocks.find((x) => plainText(x.text).trim());
     if (!b) return "";
-    const t = b.text.trim();
+    const t = plainText(b.text).trim();
     return t.length > 70 ? t.slice(0, 70) + "\u2026" : t;
   };
 
@@ -1636,6 +1659,7 @@ export default function Screenwriter() {
                 </button>
                 {!pomo && <button className="menu-item" onClick={() => { setPomo({ phase: "work", remaining: 1500, running: true }); setMenuOpen(false); }}><Timer size={14} /> Focus timer (25 min)</button>}
                 <button className="menu-item" onClick={() => { setMenuOpen(false); editorRef.current && editorRef.current.toggleDual(); }}><Columns size={14} /> Toggle dual dialogue (⌘D)</button>
+                <button className="menu-item" onClick={() => { setMenuOpen(false); editorRef.current && editorRef.current.toggleItalic(); }}><Italic size={14} /> Italic (⌘I)</button>
                 {doc.collabKey && (
                   <button className="menu-item" onClick={() => { setMenuOpen(false); rotateCollabKey(); }}><Wifi size={14} /> Reset live session access</button>
                 )}
@@ -1741,7 +1765,7 @@ export default function Screenwriter() {
                           </button>
                         )}
                         <span className="card-num">{i + 1}</span>
-                        <span className="card-heading">{(h && h.text.trim()) || "Untitled scene"}</span>
+                        <span className="card-heading">{(h && plainText(h.text).trim()) || "Untitled scene"}</span>
                         <span className="card-actions" onClick={(e) => e.stopPropagation()}>
                           {h && (
                             <button className="ghost" title={h.act !== undefined ? "Remove act flag" : "Add act flag"}
@@ -1810,7 +1834,7 @@ export default function Screenwriter() {
             />
           </div>
           <div className="hint-bar">
-            enter&thinsp;next element &nbsp;&middot;&nbsp; tab&thinsp;change type &nbsp;&middot;&nbsp; ⌘D&thinsp;dual dialogue &nbsp;&middot;&nbsp; ⌘Z&thinsp;undo
+            enter&thinsp;next element &nbsp;&middot;&nbsp; tab&thinsp;change type &nbsp;&middot;&nbsp; ⌘I&thinsp;italic &nbsp;&middot;&nbsp; ⌘D&thinsp;dual dialogue &nbsp;&middot;&nbsp; ⌘Z&thinsp;undo
           </div>
         </main>
 
@@ -1827,6 +1851,19 @@ export default function Screenwriter() {
             </div>
             <div ref={treatmentRef} className="treatment-editor" contentEditable suppressContentEditableWarning
               data-placeholder="Paste or write your treatment here."
+              /* strip inherited paste colors at the source, before they land in
+                 the DOM and get saved, so night mode stays readable */
+              onPaste={(e) => {
+                e.preventDefault();
+                const cb = e.clipboardData;
+                const rawHtml = cb.getData("text/html");
+                if (rawHtml) {
+                  const clean = stripInlineColor(rawHtml.replace(/<script[\s\S]*?<\/script>/gi, ""));
+                  document.execCommand("insertHTML", false, clean);
+                } else {
+                  document.execCommand("insertText", false, cb.getData("text/plain"));
+                }
+              }}
               /* read the DOM now: React nulls currentTarget before a deferred
                  updater runs, and this one defers whenever an update is pending */
               onInput={(e) => { const html = e.currentTarget.innerHTML; setDoc((d) => ({ ...d, treatment: html })); }} spellCheck />

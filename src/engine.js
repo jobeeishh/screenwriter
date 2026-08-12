@@ -35,6 +35,147 @@ export const TYPE_LABEL = {
 
 export const newBlock = (type = "action", text = "") => ({ id: uid(), type, text });
 
+/* ----------------------------------------------------------------- emphasis
+   Italics ride inside block.text as fountain's *asterisks*, so a block stays
+   one plain string. Sync, undo, autosave, search and every export keep working
+   on strings; only the editor and the exporters need to know about runs.
+   A literal asterisk or backslash escapes with a backslash. */
+
+const escHTML = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const escMark = (s) => String(s).replace(/[\\*]/g, "\\$&");
+
+const isSpace = (c) => c === undefined || /\s/.test(c);
+
+/* Every asterisk the escapes didn't claim. */
+const starsIn = (s) => {
+  const out = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && (s[i + 1] === "*" || s[i + 1] === "\\")) { i++; continue; }
+    if (s[i] === "*") out.push(i);
+  }
+  return out;
+};
+
+/* Pair them fountain's way: an opener has a non-space after it, a closer has a
+   non-space before it, and the pair has to hold something. Odd stars out stay
+   literal, so a lone asterisk in an action line is just an asterisk. */
+const starPairs = (s) => {
+  const stars = starsIn(s);
+  const pairs = [];
+  let i = 0;
+  while (i < stars.length) {
+    const open = stars[i];
+    if (!isSpace(s[open + 1])) {
+      let j = i + 1;
+      while (j < stars.length && (stars[j] <= open + 1 || isSpace(s[stars[j] - 1]))) j++;
+      if (j < stars.length) { pairs.push([open, stars[j]]); i = j + 1; continue; }
+    }
+    i++;
+  }
+  return pairs;
+};
+
+/* marked text -> [{ text, italic }] */
+export function parseMarks(src) {
+  const s = String(src == null ? "" : src);
+  const pairs = starPairs(s);
+  const opens = new Set(pairs.map(([a]) => a));
+  const closes = new Set(pairs.map(([, b]) => b));
+  const runs = [];
+  let buf = "";
+  let italic = false;
+  const flush = () => { if (buf) runs.push({ text: buf, italic }); buf = ""; };
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\" && (s[i + 1] === "*" || s[i + 1] === "\\")) { buf += s[++i]; continue; }
+    if (opens.has(i)) { flush(); italic = true; continue; }
+    if (closes.has(i)) { flush(); italic = false; continue; }
+    buf += c;
+  }
+  flush();
+  return runs;
+}
+
+/* [{ text, italic }] -> marked text */
+export function renderMarks(runs) {
+  const out = [];
+  (runs || []).forEach((r) => {
+    const t = String(r.text || "");
+    if (!t) return;
+    if (!r.italic) { out.push({ text: t, italic: false }); return; }
+    /* whitespace has to sit outside the asterisks or the result won't re-parse */
+    const lead = t.match(/^\s*/)[0];
+    if (lead.length === t.length) { out.push({ text: t, italic: false }); return; }
+    const trail = t.match(/\s*$/)[0];
+    if (lead) out.push({ text: lead, italic: false });
+    out.push({ text: t.slice(lead.length, t.length - trail.length), italic: true });
+    if (trail) out.push({ text: trail, italic: false });
+  });
+  /* merge neighbours so a split never emits *a**b* */
+  const merged = [];
+  out.forEach((r) => {
+    const last = merged[merged.length - 1];
+    if (last && last.italic === r.italic) last.text += r.text;
+    else merged.push({ ...r });
+  });
+  return merged.map((r) => (r.italic ? `*${escMark(r.text)}*` : escMark(r.text))).join("");
+}
+
+/* What the reader sees: markers resolved, escapes undone. Use this anywhere a
+   block's words are matched, measured, spoken or shown outside the page. */
+export const plainText = (text) => parseMarks(text).map((r) => r.text).join("");
+
+/* Substring by PLAIN offsets, returned still marked. */
+export function sliceMarked(text, start, end) {
+  const out = [];
+  let seen = 0;
+  for (const r of parseMarks(text)) {
+    const a = Math.max(start, seen);
+    const b = Math.min(end, seen + r.text.length);
+    if (b > a) out.push({ text: r.text.slice(a - seen, b - seen), italic: r.italic });
+    seen += r.text.length;
+    if (seen >= end) break;
+  }
+  return renderMarks(out);
+}
+
+/* .trim() that keeps the markers intact. */
+export function trimMarked(text) {
+  const plain = plainText(text);
+  const start = plain.length - plain.replace(/^\s+/, "").length;
+  const end = plain.replace(/\s+$/, "").length;
+  return end > start ? sliceMarked(text, start, end) : "";
+}
+
+export const marksToHTML = (text) =>
+  parseMarks(text)
+    .map((r) => (r.italic ? `<em>${escHTML(r.text)}</em>` : escHTML(r.text)))
+    .join("");
+
+const isItalicEl = (el) =>
+  el.nodeName === "EM" || el.nodeName === "I" ||
+  (el.style && el.style.fontStyle === "italic");
+
+/* One block's DOM -> marked text. Tolerant of whatever markup the browser or a
+   paste left behind: anything not italic simply contributes its words. */
+export function readMarks(el) {
+  const runs = [];
+  const walk = (node, italic) => {
+    if (node.nodeType === 3) {
+      const t = node.textContent.replace(/\u00a0/g, " ").replace(/\n/g, " ");
+      if (t) runs.push({ text: t, italic });
+      return;
+    }
+    if (node.nodeType !== 1 || node.nodeName === "BR") return;
+    const it = italic || isItalicEl(node);
+    Array.from(node.childNodes).forEach((c) => walk(c, it));
+  };
+  Array.from(el.childNodes).forEach((c) => walk(c, false));
+  return renderMarks(runs);
+}
+
 export const DEFAULT_DOC = () => ({
   title: "UNTITLED",
   theme: "",
@@ -145,9 +286,9 @@ export function moveScene(blocks, from, to) {
    interrupts them, within the same scene. */
 export function needsContd(blocks, idx) {
   const el = blocks[idx];
-  if (!el || el.type !== "character" || !el.text.trim()) return false;
-  if (/\(CONT'D\)/i.test(el.text)) return false;
-  const clean = (t) => t.toUpperCase().replace(/\(.*?\)/g, "").trim();
+  if (!el || el.type !== "character" || !plainText(el.text).trim()) return false;
+  if (/\(CONT'D\)/i.test(plainText(el.text))) return false;
+  const clean = (t) => plainText(t).toUpperCase().replace(/\(.*?\)/g, "").trim();
   const name = clean(el.text);
   if (!name) return false;
   let sawAction = false;
@@ -167,7 +308,7 @@ export function priorSpeakers(blocks, idx) {
     const b = blocks[k];
     if (b.type === "heading") break;
     if (b.type !== "character") continue;
-    const n = b.text.toUpperCase().replace(/\(.*?\)/g, "").trim();
+    const n = plainText(b.text).toUpperCase().replace(/\(.*?\)/g, "").trim();
     if (n && !seen.includes(n)) seen.push(n);
   }
   return seen.length > 1 ? [seen[1], seen[0], ...seen.slice(2)] : seen;
@@ -177,7 +318,7 @@ export function allCharacters(blocks) {
   const set = new Set();
   blocks.forEach((b) => {
     if (b.type !== "character") return;
-    const n = b.text.toUpperCase().replace(/\(.*?\)/g, "").trim();
+    const n = plainText(b.text).toUpperCase().replace(/\(.*?\)/g, "").trim();
     if (n) set.add(n);
   });
   return [...set].sort();
@@ -243,9 +384,83 @@ export function unpair(blocks, pairId) {
 }
 
 /* ------------------------------------------------------------ text parsing */
-/* Parse pasted / imported plain text using standard-format heuristics. */
-export function parseScriptText(raw) {
-  const lines = String(raw).replace(/\r\n/g, "\n").split("\n");
+/* Two readers for pasted / imported plain text.
+
+   Text copied out of Final Draft (or a PDF, or a printed script) arrives LAID
+   OUT: the element type is carried by the indent column, which is far more
+   reliable than guessing from capitals. Fountain and hand-typed text arrive
+   flush left, where capitals and punctuation are all there is to go on. We
+   measure the columns first and pick the reader that fits. */
+
+const indentOf = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, "    ").length;
+
+const mode = (xs) => {
+  const count = new Map();
+  xs.forEach((x) => count.set(x, (count.get(x) || 0) + 1));
+  let best = xs[0], n = 0;
+  count.forEach((c, x) => { if (c > n || (c === n && x > best)) { best = x; n = c; } });
+  return best;
+};
+
+/* "JOHN (O.S.)" -> "JOHN". The extension has to come off WHOLE: stripping just
+   the ")" leaves "JOHN (O.S." looking like a sentence that ends in a period,
+   which is exactly how a cue with an extension got read as action. */
+const cueBase = (t) => t.replace(/\s*\([^()]*\)\s*$/, "").trim();
+
+const looksLikeCue = (t) => {
+  const base = cueBase(t);
+  if (!base || base.length > 40) return false;
+  if (base !== base.toUpperCase() || !/[A-Z]/.test(base)) return false;
+  return !/[.!?]$/.test(base);
+};
+
+const isTransition = (t) => TRANSITION_RE.test(t.toUpperCase());
+
+/* Standard margins put dialogue 12 columns left of the cue. So if the cue
+   column is the full 22 the copy includes the action margin; if it is only
+   about 12, the copy started inside a speech and column 0 IS the dialogue. */
+const CUE_COL_WITH_MARGIN = 18;
+
+function parseLaidOut(lines, charCol, base) {
+  const blocks = [];
+  let prevType = null;
+  let gap = true; // a blank line ends a wrapped paragraph
+  const push = (type, text) => {
+    /* action and dialogue wrap across lines; rejoin them into one element */
+    if (!gap && type === prevType && (type === "action" || type === "dialogue")) {
+      const prev = blocks[blocks.length - 1];
+      prev.text = `${prev.text} ${text}`;
+      return;
+    }
+    blocks.push(newBlock(type, text));
+    prevType = type;
+  };
+
+  const zeroIsAction =
+    charCol >= CUE_COL_WITH_MARGIN ||
+    lines.some((l) => l.trim() && indentOf(l) - base === 0 &&
+      (HEADING_RE.test(l.trim()) || isTransition(l.trim())));
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) { gap = true; continue; }
+    const d = indentOf(line) - base;
+
+    let type;
+    if (HEADING_RE.test(t)) type = "heading";
+    else if (isTransition(t)) type = "transition";
+    else if (t.startsWith("(") && d > 0) type = "parenthetical";
+    else if (d >= charCol - 2 && looksLikeCue(t)) type = "character";
+    else if (d === 0 && zeroIsAction) type = "action";
+    else type = "dialogue";
+
+    push(type, t);
+    gap = false;
+  }
+  return blocks;
+}
+
+function parseFlushLeft(lines) {
   const blocks = [];
   let last = null;
   for (const line of lines) {
@@ -256,7 +471,7 @@ export function parseScriptText(raw) {
 
     const isCaps = t === t.toUpperCase() && /[A-Z]/.test(t);
 
-    if (isCaps && TRANSITION_RE.test(t)) { blocks.push(newBlock("transition", t)); last = "transition"; continue; }
+    if (isCaps && isTransition(t)) { blocks.push(newBlock("transition", t)); last = "transition"; continue; }
 
     if (t.startsWith("(") && (last === "character" || last === "dialogue")) {
       blocks.push(newBlock("parenthetical", t)); last = "parenthetical"; continue;
@@ -272,12 +487,27 @@ export function parseScriptText(raw) {
       continue;
     }
 
-    if (isCaps && t.length <= 40 && !/[.!?]$/.test(t.replace(/\)$/, ""))) {
-      blocks.push(newBlock("character", t)); last = "character"; continue;
-    }
+    if (looksLikeCue(t)) { blocks.push(newBlock("character", t)); last = "character"; continue; }
 
     blocks.push(newBlock("action", t)); last = "action";
   }
+  return blocks;
+}
+
+export function parseScriptText(raw) {
+  const lines = String(raw).replace(/\r\n?/g, "\n").split("\n");
+  const live = lines.filter((l) => l.trim());
+  if (!live.length) throw new Error("Nothing readable in that text.");
+
+  /* The cue column anchors everything else, because it is the one indented
+     column a script always has. If nothing is indented, the paste is flat. */
+  const base = Math.min(...live.map(indentOf));
+  const cueCols = live
+    .filter((l) => looksLikeCue(l.trim()) && indentOf(l) - base > 0)
+    .map((l) => indentOf(l) - base);
+  const charCol = cueCols.length ? mode(cueCols) : 0;
+
+  const blocks = charCol >= 6 ? parseLaidOut(lines, charCol, base) : parseFlushLeft(lines);
   if (!blocks.length) throw new Error("Nothing readable in that text.");
   return blocks;
 }
@@ -297,8 +527,13 @@ export function parseFDX(xml) {
     Parenthetical: "parenthetical",
     Transition: "transition",
   };
+  /* each <Text> is a run; Style="Italic" (possibly among other styles) is ours */
   const textOf = (p) =>
-    Array.from(p.children).filter((c) => c.tagName === "Text").map((t) => t.textContent).join("");
+    renderMarks(
+      Array.from(p.children)
+        .filter((c) => c.tagName === "Text")
+        .map((t) => ({ text: t.textContent, italic: /italic/i.test(t.getAttribute("Style") || "") }))
+    );
 
   const blocks = [];
   const handle = (p, pair) => {
@@ -316,7 +551,7 @@ export function parseFDX(xml) {
     }
     const type = map[p.getAttribute("Type")] || null;
     const text = textOf(p);
-    if (!type) { if (text.trim()) blocks.push(newBlock("action", text)); return; }
+    if (!type) { if (plainText(text).trim()) blocks.push(newBlock("action", text)); return; }
     const b = newBlock(type, text);
     if (pair) { b.pairId = pair.pairId; b.pairSide = pair.side; }
     blocks.push(b);
@@ -329,7 +564,7 @@ export function parseFDX(xml) {
   const tp = dom.querySelector("TitlePage > Content");
   if (tp) {
     const first = Array.from(tp.querySelectorAll("Paragraph"))
-      .map((p) => textOf(p).trim())
+      .map((p) => plainText(textOf(p)).trim())
       .find((t) => t.length);
     if (first) title = first.toUpperCase();
   }
@@ -351,11 +586,17 @@ export function buildFDX(doc) {
   };
   const out = [];
   const emit = (b, contd, indent = "    ") => {
-    if (!b.text.trim()) return;
-    let text = b.text;
-    if (b.type === "heading" || b.type === "character" || b.type === "transition") text = text.toUpperCase();
-    if (b.type === "character" && contd) text = `${text} (CONT'D)`;
-    out.push(`${indent}<Paragraph Type="${FD_TYPE[b.type]}"><Text>${escXML(text)}</Text></Paragraph>`);
+    if (!plainText(b.text).trim()) return;
+    /* one <Text> per run, so italics survive the round trip into Final Draft */
+    let runs = parseMarks(b.text);
+    if (b.type === "heading" || b.type === "character" || b.type === "transition") {
+      runs = runs.map((r) => ({ ...r, text: r.text.toUpperCase() }));
+    }
+    if (b.type === "character" && contd) runs = [...runs, { text: " (CONT'D)", italic: false }];
+    const text = runs
+      .map((r) => `<Text${r.italic ? ' Style="Italic"' : ""}>${escXML(r.text)}</Text>`)
+      .join("");
+    out.push(`${indent}<Paragraph Type="${FD_TYPE[b.type]}">${text}</Paragraph>`);
   };
 
   groupBlocks(doc.blocks).forEach((g) => {
@@ -411,18 +652,19 @@ export function buildFountain(doc) {
   }
   paras.push(head.join("\n"));
 
-  /* a speech is one paragraph: character line, then dialogue/parentheticals */
+  /* Block text is already fountain-marked, so italics pass straight through;
+     only the structure sniffing has to look past the asterisks. */
   const speech = (blks, dual) => {
     const lines = [];
     blks.forEach((b) => {
-      const t = b.text.trim();
-      if (!t) return;
+      const t = trimMarked(b.text);
+      const p = plainText(t);
+      if (!p) return;
       if (b.type === "character") {
-        const up = t.toUpperCase();
         // fountain only recognizes an all-caps character cue; force others with @
-        lines.push((up === t ? up : `@${t}`) + (dual ? " ^" : ""));
+        lines.push((p === p.toUpperCase() ? t.toUpperCase() : `@${t}`) + (dual ? " ^" : ""));
       } else if (b.type === "parenthetical") {
-        lines.push(t.startsWith("(") ? t : `(${t})`);
+        lines.push(p.startsWith("(") ? t : `(${t})`);
       } else {
         lines.push(t);
       }
@@ -441,14 +683,13 @@ export function buildFountain(doc) {
       continue;
     }
     const b = g.block;
-    const t = b.text.trim();
-    if (!t) continue;
+    const t = trimMarked(b.text);
+    const p = plainText(t);
+    if (!p) continue;
     if (b.type === "heading") {
-      const up = t.toUpperCase();
-      paras.push(HEADING_RE.test(up) ? up : `.${t}`);
+      paras.push(HEADING_RE.test(p.toUpperCase()) ? t.toUpperCase() : `.${t}`);
     } else if (b.type === "transition") {
-      const up = t.toUpperCase();
-      paras.push(TRANSITION_RE.test(up) ? up : `> ${t}`);
+      paras.push(TRANSITION_RE.test(p.toUpperCase()) ? t.toUpperCase() : `> ${t}`);
     } else if (b.type === "character") {
       /* one speech = one paragraph: a blank line between the cue and its
          dialogue would make fountain read the cue as action */
@@ -465,7 +706,7 @@ export function buildFountain(doc) {
       if (s) paras.push(s);
     } else {
       // action that would parse as a heading or transition must be escaped
-      paras.push(HEADING_RE.test(t) || TRANSITION_RE.test(t.toUpperCase()) ? `!${t}` : t);
+      paras.push(HEADING_RE.test(p) || TRANSITION_RE.test(p.toUpperCase()) ? `!${t}` : t);
     }
   }
 
@@ -477,14 +718,11 @@ export function buildFountain(doc) {
    bridge between the block list and its HTML. Keeping them pure makes them
    testable without a browser. */
 
-const escHTML = (s) =>
-  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
 export function buildHTML(blocks) {
   const html = [];
   const blk = (b) =>
     `<div class="blk ${b.type}" data-id="${b.id}" data-type="${b.type}">${
-      b.text ? escHTML(b.text) : "<br>"
+      (b.text && marksToHTML(b.text)) || "<br>"
     }</div>`;
 
   groupBlocks(blocks).forEach((g) => {
@@ -506,11 +744,7 @@ export function readBlocks(root) {
   const blocks = [];
   const readBlk = (el, pair) => {
     const type = el.dataset.type && TYPES.includes(el.dataset.type) ? el.dataset.type : "action";
-    const b = {
-      id: el.dataset.id || uid(),
-      type,
-      text: el.textContent.replace(/\u00a0/g, " ").replace(/\n/g, " "),
-    };
+    const b = { id: el.dataset.id || uid(), type, text: readMarks(el) };
     if (pair) { b.pairId = pair.pairId; b.pairSide = pair.side; }
     blocks.push(b);
   };

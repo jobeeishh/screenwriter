@@ -1,7 +1,8 @@
 /* ============================================================================
    Voice dictation: a pure command parser + a thin SpeechRecognition wrapper.
 
-   No imports, no React, no DOM beyond the recognition API itself -- the
+   No React, no DOM beyond the recognition API itself, and the only import is
+   a pure text helper from the model -- the
    parser is a pure function so the whole grammar is unit-testable in node,
    and the wrapper exposes feed() so end-to-end behavior can be exercised
    without a microphone.
@@ -17,6 +18,8 @@
    context: { type, before }  -- current block type + text before the caret
    opts   : { commands=true, autoCap=true }
    ==========================================================================*/
+
+import { plainText } from "./engine.js";
 
 const splitWords = (s) => String(s).split(/\s+/).filter(Boolean);
 
@@ -299,7 +302,8 @@ export function buildReadbackPlan(blocks) {
   const plan = [];
   let speaker = null;
   for (const b of blocks || []) {
-    const t = String(b.text || "").trim();
+    /* italics are emphasis for the eye; the voice just reads the words */
+    const t = plainText(b.text).trim();
     if (!t) continue;
     if (b.type === "character") {
       speaker = t.replace(/\(.*?\)/g, "").trim(); // MARY (V.O.) -> MARY

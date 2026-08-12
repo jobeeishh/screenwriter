@@ -36,6 +36,12 @@ export const CSS = `
   background: var(--panel); border-bottom: 1px solid var(--line);
   position: relative; z-index: 5;
 }
+/* On wide monitors the fixed-width side clusters leave room to spare, so let the
+   theme bar breathe. Kept behind a min-width gate: at laptop widths and below the
+   grid is unchanged, and the ~499px right cluster would otherwise force overlap. */
+@media (min-width: 1600px) {
+  .topbar { grid-template-columns: 1fr minmax(160px, 560px) 1fr; }
+}
 .tb-left, .tb-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .tb-left { justify-self: start; }
 .tb-right { justify-self: end; }
@@ -209,6 +215,8 @@ export const CSS = `
 
 /* ---- screenplay blocks (inside one contenteditable) ---- */
 .blk { position: relative; white-space: pre-wrap; word-wrap: break-word; min-height: 1.15em; }
+/* italics, stated outright: Courier's oblique is subtle and print resets styles */
+.blk em, .blk i { font-style: italic; }
 .blk.heading {
   margin-top: 30px; font-weight: 700; text-transform: uppercase;
 }
@@ -436,7 +444,9 @@ export const CSS = `
   white-space: nowrap; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
 }
 .mbar-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.mbar-dual { margin-left: 6px; border-left-width: 3px; border-left-color: var(--faint); }
+.mbar-italic { margin-left: 6px; border-left-width: 3px; border-left-color: var(--faint); }
+.mbar-italic em { font-style: italic; font-family: 'Courier Prime', monospace; }
+.mbar-dual { border-left-width: 3px; border-left-color: var(--faint); }
 .mbar-chip { font-family: 'Courier Prime', monospace; letter-spacing: .04em; }
 
 /* On touch the bar owns the suggestions; the caret-anchored menu would sit

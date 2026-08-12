@@ -3,6 +3,7 @@ import {
   HEADING_RE, NEXT_TYPE, TYPE_CYCLE, CHAR_EXTENSIONS,
   buildHTML, readBlocks, needsContd, priorSpeakers, allCharacters,
   parseScriptText, canPairAt, pairAt, unpair, uid,
+  marksToHTML, readMarks, sliceMarked,
 } from "./engine.js";
 
 /* ===========================================================================
@@ -41,22 +42,36 @@ const caretOffset = (blk) => {
   return r.toString().length;
 };
 
+/* A block is no longer guaranteed to be one text node -- italics put <em> runs
+   inside it -- so positions are plain-text offsets resolved by walking. */
+const pointAt = (blk, pos) => {
+  const w = document.createTreeWalker(blk, NodeFilter.SHOW_TEXT, null);
+  let n, seen = 0, last = null;
+  while ((n = w.nextNode())) {
+    if (pos <= seen + n.length) return { node: n, off: pos - seen };
+    seen += n.length;
+    last = n;
+  }
+  return last ? { node: last, off: last.length } : null;
+};
+
 const setCaret = (blk, pos) => {
   if (!blk) return;
-  const sel = window.getSelection();
+  const len = blk.textContent.length;
+  const target = pos === "end" ? len : pos === "start" ? 0 : Math.max(0, Math.min(pos, len));
+  const p = pointAt(blk, target);
   const r = document.createRange();
-  const text = blk.firstChild && blk.firstChild.nodeType === 3 ? blk.firstChild : null;
-  const target = pos === "end" ? (text ? text.length : 0) : pos === "start" ? 0 : pos;
-  if (text) r.setStart(text, Math.max(0, Math.min(target, text.length)));
+  if (p) r.setStart(p.node, p.off);
   else r.setStart(blk, 0);
   r.collapse(true);
+  const sel = window.getSelection();
   sel.removeAllRanges();
   sel.addRange(r);
 };
 
+/* `text` is marked text (fountain asterisks); the block renders it as <em>. */
 const setBlockText = (blk, text) => {
-  if (text) blk.textContent = text;
-  else blk.innerHTML = "<br>";
+  blk.innerHTML = (text && marksToHTML(text)) || "<br>";
 };
 
 const makeBlk = (type, text) => {
@@ -74,6 +89,19 @@ const setType = (blk, type) => {
 };
 
 const isInDual = (blk) => blk.parentNode && blk.parentNode.classList.contains("dual-col");
+
+/* Anything inside a block that is not one of these has to go. */
+const KEEP_INLINE = "*:not(br):not(em):not(i)";
+
+const unwrapInline = (blk) => {
+  blk.querySelectorAll(KEEP_INLINE).forEach((el) => {
+    /* a <span style="font-style:italic"> is still an italic; keep the meaning */
+    const italic = el.style && el.style.fontStyle === "italic";
+    const holder = italic ? document.createElement("em") : document.createDocumentFragment();
+    while (el.firstChild) holder.appendChild(el.firstChild);
+    el.replaceWith(holder);
+  });
+};
 
 /* a stable hue per collaborator name, for their cursor */
 const hueFor = (name) => {
@@ -125,6 +153,7 @@ const ScriptEditor = forwardRef(function ScriptEditor(
   const [coarse] = useState(isCoarse);
   const [caretType, setCaretType] = useState(null);
   const [caretDual, setCaretDual] = useState(false);
+  const [italicOn, setItalicOn] = useState(false);
   const [kbTop, setKbTop] = useState(0);
   const [editing, setEditing] = useState(false);
   const lastBlkIdRef = useRef(null);
@@ -215,6 +244,7 @@ const ScriptEditor = forwardRef(function ScriptEditor(
       if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); setCaret(el, "end"); }
     },
     toggleDual,
+    toggleItalic,
     root: () => rootRef.current,
 
     /* ------- dictation interface: all DOM mutation stays in here ------- */
@@ -290,14 +320,15 @@ const ScriptEditor = forwardRef(function ScriptEditor(
       if (!root || !n) return;
       const blk = currentBlock(root);
       if (!blk) return;
-      const t = blk.firstChild && blk.firstChild.nodeType === 3 ? blk.firstChild : null;
-      if (!t) return;
-      const end = Math.min(caretOffset(blk), t.length);
+      const end = Math.min(caretOffset(blk), blk.textContent.length);
       const start = Math.max(0, end - n);
       if (start >= end) return;
+      const a = pointAt(blk, start);
+      const b = pointAt(blk, end);
+      if (!a || !b) return;
       const sel = window.getSelection();
       const r = document.createRange();
-      r.setStart(t, start); r.setEnd(t, end);
+      r.setStart(a.node, a.off); r.setEnd(b.node, b.off);
       sel.removeAllRanges(); sel.addRange(r);
       document.execCommand("delete");
       decorate();
@@ -334,8 +365,10 @@ const ScriptEditor = forwardRef(function ScriptEditor(
       }
       if (!n.dataset.id) n.dataset.id = uid();
       if (!n.dataset.type) n.dataset.type = "action";
-      // strip pasted markup: keep text only (skip if it would nuke the caret needlessly)
-      if (n.querySelector("*:not(br)")) n.textContent = n.textContent;
+      /* Keep <em>/<i> -- they are the italics. Everything else the browser or a
+         paste left behind gets unwrapped down to its words. The querySelector
+         guard means ordinary typing never touches the DOM, so the caret is safe. */
+      if (n.querySelector(KEEP_INLINE)) unwrapInline(n);
       if (!n.textContent.length && !n.querySelector("br")) n.innerHTML = "<br>";
     });
   };
@@ -390,7 +423,13 @@ const ScriptEditor = forwardRef(function ScriptEditor(
         if (!root || !root.isConnected) return;
         if (Date.now() - suppressRef.current < 250) return; // just accepted a suggestion
         const sel = window.getSelection();
-        if (!sel || !sel.rangeCount || !sel.isCollapsed) { closeMenu(); return; }
+        if (!sel || !sel.rangeCount) { closeMenu(); return; }
+        /* the italic button reflects the caret OR the selection, so it lights up
+           before you press it on a range you just dragged over */
+        if (root.contains(sel.anchorNode)) {
+          try { setItalicOn(document.queryCommandState("italic")); } catch { /* unsupported */ }
+        }
+        if (!sel.isCollapsed) { closeMenu(); return; }
         if (!root.contains(sel.anchorNode)) return;
         const blk = blockOf(sel.anchorNode, root);
         if (blk) {
@@ -428,14 +467,10 @@ const ScriptEditor = forwardRef(function ScriptEditor(
       if (!el) return;
       const blk = root.querySelector(`[data-id="${c.blkId}"]`);
       if (!blk) { el.style.display = "none"; return; }
-      const t = blk.firstChild && blk.firstChild.nodeType === 3 ? blk.firstChild : null;
+      const p = pointAt(blk, Math.max(0, Math.min(c.off, blk.textContent.length)));
       const r = document.createRange();
-      if (t) {
-        const off = Math.max(0, Math.min(c.off, t.length));
-        r.setStart(t, off);
-      } else {
-        r.selectNodeContents(blk);
-      }
+      if (p) r.setStart(p.node, p.off);
+      else r.selectNodeContents(blk);
       r.collapse(true);
       let rect = r.getBoundingClientRect();
       if (!rect.height && !rect.top) rect = blk.getBoundingClientRect();
@@ -495,6 +530,23 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     sync(true);
   };
 
+  /* ---------------- italics (Cmd/Ctrl+I) ----------------
+     execCommand is the one path that italicizes a selection without rebuilding
+     the block, so the caret and the browser's own undo stack both survive. With
+     nothing selected it arms the style instead, and the next words come out
+     italic -- which is how you italicize a word you haven't written yet. */
+  const toggleItalic = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !root.contains(sel.anchorNode)) return;
+    /* ask for <i> tags rather than styled spans, so readMarks sees an element */
+    try { document.execCommand("styleWithCSS", false, false); } catch { /* older engines */ }
+    document.execCommand("italic");
+    try { setItalicOn(document.queryCommandState("italic")); } catch { /* unsupported */ }
+    sync();
+  }, [sync]);
+
   /* ---------------- dual dialogue toggle (Cmd/Ctrl+D) ---------------- */
   const toggleDual = useCallback(() => {
     const root = rootRef.current;
@@ -549,6 +601,12 @@ const ScriptEditor = forwardRef(function ScriptEditor(
       return;
     }
 
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "i") {
+      e.preventDefault();
+      toggleItalic();
+      return;
+    }
+
     if (e.key === "Tab") {
       e.preventDefault();
       const blk = currentBlock(root);
@@ -571,7 +629,8 @@ const ScriptEditor = forwardRef(function ScriptEditor(
 
   const handleEnter = (blk, root) => {
     const type = blk.dataset.type;
-    const text = blk.textContent;
+    const text = blk.textContent;   // what the caret is measured against
+    const marked = readMarks(blk);  // what survives the split
     const empty = !text.trim();
 
     /* empty line inside a dual block: step out of the block entirely */
@@ -605,8 +664,8 @@ const ScriptEditor = forwardRef(function ScriptEditor(
 
     /* otherwise: split at the caret and start the next element */
     const pos = caretOffset(blk);
-    const before = text.slice(0, pos);
-    const after = text.slice(pos);
+    const before = sliceMarked(marked, 0, pos);
+    const after = sliceMarked(marked, pos, text.length);
     setBlockText(blk, before);
 
     const nextType = NEXT_TYPE[type] || "action";
@@ -648,7 +707,7 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     const blk = currentBlock(root);
     if (!blk) return;
 
-    if (!text.includes("\n")) {
+    if (!/[\r\n]/.test(text)) {
       document.execCommand("insertText", false, text);
       sync();
       return;
@@ -764,6 +823,14 @@ const ScriptEditor = forwardRef(function ScriptEditor(
                 {label}
               </button>
             ))}
+            <button
+              type="button"
+              className={`mbar-btn mbar-italic${italicOn ? " on" : ""}`}
+              title="Italic"
+              onMouseDown={(e) => { e.preventDefault(); toggleItalic(); }}
+            >
+              <em>I</em>
+            </button>
             <button
               type="button"
               className={`mbar-btn mbar-dual${caretDual ? " on" : ""}`}
