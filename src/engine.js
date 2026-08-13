@@ -460,36 +460,40 @@ function parseLaidOut(lines, charCol, base) {
   return blocks;
 }
 
+/* Roughly where action wraps; a line at least this long was probably broken by
+   the page, not by the writer, so the next line continues it. */
+const WRAP_COL = 45;
+
+/* Without indentation, what a line IS depends on what came before it: dialogue
+   is dialogue because a cue opened the speech. So a blank line must NOT clear
+   that context -- it only ends a wrapped paragraph. Clearing it is what turned
+   every spoken line into action, because plain-text exports normally put a
+   blank line between a cue and its dialogue. */
 function parseFlushLeft(lines) {
   const blocks = [];
   let last = null;
+  let gap = true;   // blank line since the previous one?
+  let prevLen = 0;
+  const append = (t) => { const p = blocks[blocks.length - 1]; p.text = `${p.text} ${t}`; };
+  const push = (type, t) => { blocks.push(newBlock(type, t)); last = type; };
+
   for (const line of lines) {
     const t = line.trim();
-    if (!t) { last = null; continue; }
-
-    if (HEADING_RE.test(t)) { blocks.push(newBlock("heading", t)); last = "heading"; continue; }
-
+    if (!t) { gap = true; continue; }
     const isCaps = t === t.toUpperCase() && /[A-Z]/.test(t);
 
-    if (isCaps && isTransition(t)) { blocks.push(newBlock("transition", t)); last = "transition"; continue; }
+    if (HEADING_RE.test(t)) push("heading", t);
+    else if (isCaps && isTransition(t)) push("transition", t);
+    else if (t.startsWith("(") && (last === "character" || last === "dialogue")) push("parenthetical", t);
+    /* a cue opens a speech, blank line or not */
+    else if (last === "character" || last === "parenthetical") push("dialogue", t);
+    else if (last === "dialogue" && !gap && !isCaps) append(t);
+    else if (last === "action" && !gap && !isCaps && prevLen >= WRAP_COL) append(t);
+    else if (looksLikeCue(t)) push("character", t);
+    else push("action", t);
 
-    if (t.startsWith("(") && (last === "character" || last === "dialogue")) {
-      blocks.push(newBlock("parenthetical", t)); last = "parenthetical"; continue;
-    }
-
-    if (last === "character" || last === "parenthetical") {
-      blocks.push(newBlock("dialogue", t)); last = "dialogue"; continue;
-    }
-
-    if (last === "dialogue" && !isCaps) {
-      const prev = blocks[blocks.length - 1];
-      prev.text = `${prev.text} ${t}`; // wrapped line continues the same speech
-      continue;
-    }
-
-    if (looksLikeCue(t)) { blocks.push(newBlock("character", t)); last = "character"; continue; }
-
-    blocks.push(newBlock("action", t)); last = "action";
+    gap = false;
+    prevLen = t.length;
   }
   return blocks;
 }
@@ -507,7 +511,9 @@ export function parseScriptText(raw) {
     .map((l) => indentOf(l) - base);
   const charCol = cueCols.length ? mode(cueCols) : 0;
 
-  const blocks = charCol >= 6 ? parseLaidOut(lines, charCol, base) : parseFlushLeft(lines);
+  /* 3 columns is one tab's worth: enough to mean the paste carries a layout,
+     small enough not to trip on a stray leading space. */
+  const blocks = charCol >= 3 ? parseLaidOut(lines, charCol, base) : parseFlushLeft(lines);
   if (!blocks.length) throw new Error("Nothing readable in that text.");
   return blocks;
 }
