@@ -35,6 +35,27 @@ export const TYPE_LABEL = {
 
 export const newBlock = (type = "action", text = "") => ({ id: uid(), type, text });
 
+/* ---------------------------------------------------------------- revisions
+   Production drafts reissue changed pages on coloured paper, in this order,
+   with an asterisk in the margin beside every changed line. A block's
+   `revision` holds the colour it was last changed under; null means the block
+   has not moved since the script was locked. */
+export const REVISIONS = [
+  { key: "blue", label: "Blue" },
+  { key: "pink", label: "Pink" },
+  { key: "yellow", label: "Yellow" },
+  { key: "green", label: "Green" },
+  { key: "goldenrod", label: "Goldenrod" },
+  { key: "buff", label: "Buff" },
+  { key: "salmon", label: "Salmon" },
+  { key: "cherry", label: "Cherry" },
+];
+
+export const revisionLabel = (key) => {
+  const r = REVISIONS.find((x) => x.key === key);
+  return r ? r.label : "";
+};
+
 /* ----------------------------------------------------------------- emphasis
    Italics ride inside block.text as fountain's *asterisks*, so a block stays
    one plain string. Sync, undo, autosave, search and every export keep working
@@ -764,9 +785,9 @@ export function buildFountain(doc) {
 export function buildHTML(blocks) {
   const html = [];
   const blk = (b) =>
-    `<div class="blk ${b.type}" data-id="${b.id}" data-type="${b.type}">${
-      (b.text && marksToHTML(b.text)) || "<br>"
-    }</div>`;
+    `<div class="blk ${b.type}" data-id="${b.id}" data-type="${b.type}"${
+      b.revision ? ` data-rev="${b.revision}"` : ""
+    }>${(b.text && marksToHTML(b.text)) || "<br>"}</div>`;
 
   groupBlocks(blocks).forEach((g) => {
     if (g.kind === "single") { html.push(blk(g.block)); return; }

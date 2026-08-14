@@ -181,6 +181,22 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version]);
 
+  /* ---------------- revision marks ----------------
+     Another data-attribute decoration, like scene numbers and CONT'D. Driven
+     from the model rather than from the DOM, because whether a line changed is
+     something only the model knows -- and kept off the text nodes, so marking a
+     line can never disturb the caret sitting in it. */
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    blocks.forEach((b) => {
+      const el = root.querySelector(`[data-id="${b.id}"]`);
+      if (!el) return;
+      if (b.revision) el.dataset.rev = b.revision;
+      else if (el.dataset.rev) delete el.dataset.rev;
+    });
+  }, [blocks]);
+
   /* ---------------- decorations: scene numbers + CONT'D ---------------- */
   const decorate = useCallback(() => {
     const root = rootRef.current;

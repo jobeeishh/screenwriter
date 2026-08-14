@@ -127,6 +127,18 @@ export const CSS = `
 .pop-btn.secondary.danger:hover { color: #B4453B; border-color: #B4453B; }
 .menu-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 9px; background: transparent; border: none; border-radius: 6px; font-size: 12px; color: var(--text); text-align: left; }
 .menu-item:hover { background: var(--panel2); }
+.menu-sep { height: 1px; background: var(--line); margin: 6px 2px; }
+.menu-label { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); padding: 2px 9px 4px; }
+
+/* revision swatches: the production paper colours, in their standard order */
+.rev-swatches { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 9px 2px; }
+.rev-swatch {
+  width: 20px; height: 20px; border-radius: 5px; padding: 0;
+  border: 1px solid var(--line); background: var(--rev, transparent);
+  font-size: 11px; line-height: 1; color: var(--faint); cursor: pointer;
+}
+.rev-swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rev-swatch[data-rev="none"] { background: transparent; }
 .ver-list { margin-top: 10px; max-height: 240px; overflow-y: auto; }
 .ver-row { display: flex; align-items: center; gap: 6px; padding: 6px 2px; border-top: 1px solid var(--line); }
 .ver-info { flex: 1; min-width: 0; }
@@ -240,6 +252,39 @@ export const CSS = `
 .blk.parenthetical { margin-left: 1.6in; width: 2.4in; color: #4A4A46; }
 .blk.dialogue { margin-left: 1in; width: 3.5in; }
 .blk.transition { margin-top: 14px; text-align: right; text-transform: uppercase; }
+/* ---- revision marks ----
+   The paper colours, and where the asterisk sits. It belongs at the page's
+   right margin, but a pseudo-element anchors to its own block, and blocks are
+   indented differently -- so each type declares how far its right edge is from
+   the margin. Which pseudo-element carries it also varies, because ::after is
+   already spoken for on character (CONT'D) and ::before on heading (the scene
+   number). Absolute positioning means the name doesn't affect where it lands. */
+[data-rev="blue"]      { --rev: #BFD4EC; }
+[data-rev="pink"]      { --rev: #F3C9DA; }
+[data-rev="yellow"]    { --rev: #F2E4A8; }
+[data-rev="green"]     { --rev: #C3E0C0; }
+[data-rev="goldenrod"] { --rev: #E8CE8E; }
+[data-rev="buff"]      { --rev: #EADDC4; }
+[data-rev="salmon"]    { --rev: #F5C6B4; }
+[data-rev="cherry"]    { --rev: #E9A9AE; }
+
+.blk { --rev-right: -0.38in; }
+.blk.dialogue { --rev-right: -1.88in; }
+.blk.parenthetical { --rev-right: -2.38in; }
+
+.blk[data-rev]:not(.heading)::before,
+.blk.heading[data-rev]::after {
+  content: "*";
+  position: absolute; right: var(--rev-right); top: 0;
+  color: var(--ink-dim); font-weight: 400; text-transform: none;
+  user-select: none; pointer-events: none;
+}
+/* the colour reads on screen; the asterisk is what survives a black-and-white
+   printer, which is the whole point of the convention */
+.blk[data-rev] { background: linear-gradient(var(--rev), var(--rev)) left / 3px 100% no-repeat; }
+.sw-root.night .blk[data-rev] { background-blend-mode: normal; }
+@media print { .blk[data-rev] { background: none; } }
+
 /* placeholders: an "empty" block holds a single <br>, so :empty won't match it */
 .blk:has(> br:only-child)::before {
   color: #C6C4BA; font-weight: 400; text-transform: none;

@@ -9,7 +9,7 @@ import ScriptEditor from "./ScriptEditor.jsx";
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
-  plainText, findMatches,
+  plainText, findMatches, REVISIONS, revisionLabel,
 } from "./engine.js";
 import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope, hashStr } from "./sync.js";
 import { createDictation, createReadback, buildReadbackPlan } from "./dictation.js";
@@ -257,22 +257,43 @@ export default function Screenwriter() {
   /* ---------------- editor <-> state ---------------- */
   const onEditorChange = useCallback((blocks, structural) => {
     setDoc((d) => {
-      /* preserve scene metadata (act/done/synopsis) across edits by block id */
+      /* preserve scene metadata (act/done/synopsis/revision) across edits by id */
       const meta = new Map();
+      const was = new Map();
       d.blocks.forEach((b) => {
-        if (b.act !== undefined || b.done !== undefined || b.synopsis !== undefined) {
-          const m = {};
-          if (b.act !== undefined) m.act = b.act;
-          if (b.done !== undefined) m.done = b.done;
-          if (b.synopsis !== undefined) m.synopsis = b.synopsis;
-          meta.set(b.id, m);
-        }
+        const m = {};
+        if (b.act !== undefined) m.act = b.act;
+        if (b.done !== undefined) m.done = b.done;
+        if (b.synopsis !== undefined) m.synopsis = b.synopsis;
+        if (b.revision !== undefined) m.revision = b.revision;
+        if (Object.keys(m).length) meta.set(b.id, m);
+        was.set(b.id, b.text);
       });
-      const next = blocks.map((b) => (meta.has(b.id) ? { ...b, ...meta.get(b.id) } : b));
+
+      /* While a revision is open, every line whose words change -- and every
+         line that didn't exist a moment ago -- carries that revision's colour
+         from here on. That is what the asterisk in the margin means. */
+      const rev = d.revision || null;
+      const next = blocks.map((b) => {
+        const kept = meta.has(b.id) ? { ...b, ...meta.get(b.id) } : b;
+        if (!rev || !plainText(b.text).trim()) return kept;
+        const before = was.get(b.id);
+        if (before === undefined || before !== b.text) return { ...kept, revision: rev };
+        return kept;
+      });
       return { ...d, blocks: next };
     });
     if (structural) setVersion((v) => v + 1);
   }, []);
+
+  /* Open a revision (or close it with null). Clearing wipes every mark, which
+     is what you do when a coloured draft is accepted and becomes the new base. */
+  const setRevision = (key) => setDoc((d) => ({ ...d, revision: key }));
+  const clearRevisionMarks = () =>
+    setDoc((d) => ({
+      ...d,
+      blocks: d.blocks.map((b) => (b.revision === undefined ? b : (({ revision, ...r }) => r)(b))),
+    }));
 
   const setBlocks = useCallback((blocks) => {
     setDoc((d) => ({ ...d, blocks }));
@@ -1698,6 +1719,36 @@ export default function Screenwriter() {
                 {!pomo && <button className="menu-item" onClick={() => { setPomo({ phase: "work", remaining: 1500, running: true }); setMenuOpen(false); }}><Timer size={14} /> Focus timer (25 min)</button>}
                 <button className="menu-item" onClick={() => { setMenuOpen(false); editorRef.current && editorRef.current.toggleDual(); }}><Columns size={14} /> Toggle dual dialogue (⌘D)</button>
                 <button className="menu-item" onClick={() => { setMenuOpen(false); editorRef.current && editorRef.current.toggleItalic(); }}><Italic size={14} /> Italic (⌘I)</button>
+                <button className="menu-item" onClick={() => { setMenuOpen(false); setFind((f) => f || { q: "", idx: 0 }); }}><Search size={14} /> Find in script (⌘F)</button>
+
+                <div className="menu-sep" />
+                <div className="menu-label">Revision</div>
+                <div className="rev-swatches">
+                  <button
+                    className={`rev-swatch${!doc.revision ? " on" : ""}`}
+                    data-rev="none" title="Not revising — changes are unmarked"
+                    onClick={() => setRevision(null)}
+                  >—</button>
+                  {REVISIONS.map((r) => (
+                    <button
+                      key={r.key}
+                      className={`rev-swatch${doc.revision === r.key ? " on" : ""}`}
+                      data-rev={r.key}
+                      title={`${r.label} revision`}
+                      onClick={() => setRevision(r.key)}
+                    />
+                  ))}
+                </div>
+                <div className="pop-hint" style={{ marginTop: 0 }}>
+                  {doc.revision
+                    ? `Marking changed lines ${revisionLabel(doc.revision).toLowerCase()}. An asterisk prints in the margin.`
+                    : "Pick a colour to start marking every line you change from now on."}
+                </div>
+                {doc.blocks.some((b) => b.revision) && (
+                  <button className="menu-item" onClick={() => { setMenuOpen(false); clearRevisionMarks(); }}>
+                    <X size={14} /> Clear all revision marks
+                  </button>
+                )}
                 {doc.collabKey && (
                   <button className="menu-item" onClick={() => { setMenuOpen(false); rotateCollabKey(); }}><Wifi size={14} /> Reset live session access</button>
                 )}
