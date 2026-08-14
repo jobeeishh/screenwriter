@@ -783,11 +783,27 @@ export function buildFountain(doc) {
    testable without a browser. */
 
 export function buildHTML(blocks) {
+  /* Scene numbers and CONT'D are baked in here as well as applied live by the
+     editor's decorate(), so that anything rendering a block list WITHOUT the
+     editor -- a share link, a print view -- still gets a complete page. */
+  const deco = new Map();
+  let sceneNo = 0;
+  (blocks || []).forEach((b, i) => {
+    const d = {};
+    if (b.type === "heading") d.num = String(++sceneNo);
+    if (b.type === "character" && needsContd(blocks, i)) d.contd = "(CONT'D)";
+    if (d.num || d.contd) deco.set(b.id, d);
+  });
+
   const html = [];
-  const blk = (b) =>
-    `<div class="blk ${b.type}" data-id="${b.id}" data-type="${b.type}"${
+  const blk = (b) => {
+    const d = deco.get(b.id) || {};
+    return `<div class="blk ${b.type}" data-id="${b.id}" data-type="${b.type}"${
       b.revision ? ` data-rev="${b.revision}"` : ""
-    }>${(b.text && marksToHTML(b.text)) || "<br>"}</div>`;
+    }${d.num ? ` data-num="${d.num}"` : ""}${d.contd ? ` data-contd="(CONT'D)"` : ""}>${
+      (b.text && marksToHTML(b.text)) || "<br>"
+    }</div>`;
+  };
 
   groupBlocks(blocks).forEach((g) => {
     if (g.kind === "single") { html.push(blk(g.block)); return; }

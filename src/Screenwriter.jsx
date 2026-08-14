@@ -2,10 +2,11 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload, Clapperboard,
   Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText, History,
-  RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2, Search,
+  RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2, Search, Link2,
   MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic, Volume2,
 } from "lucide-react";
 import ScriptEditor from "./ScriptEditor.jsx";
+import { shareEnabled, shareRecord, shareURL, publish, shareStats, revokeShare } from "./share.js";
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
@@ -211,6 +212,60 @@ export default function Screenwriter() {
   streakRef.current = streak;
 
   const scenes = useMemo(() => deriveScenes(doc.blocks), [doc.blocks]);
+
+  /* ---------------- share links ---------------- */
+  /* The published copy is a snapshot, not a mirror: it changes when you say so,
+     so a reader is never dropped into the middle of a rewrite. */
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareRec, setShareRec] = useState(null);
+  const [sharePass, setSharePass] = useState("");
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareError, setShareError] = useState("");
+  const [shareCopied, setShareCopied] = useState(false);
+  const [shareStat, setShareStat] = useState(null);
+
+  useEffect(() => {
+    setShareRec(currentId ? shareRecord(currentId) : null);
+    setShareStat(null);
+    setShareError("");
+  }, [currentId]);
+
+  const refreshStats = useCallback(async () => {
+    if (!currentId || !shareRecord(currentId)) return;
+    try { setShareStat(await shareStats(currentId)); } catch { /* offline is fine */ }
+  }, [currentId]);
+
+  /* fetch the tally whenever the panel opens, rather than from the click
+     handler, which would read whichever `shareOpen` its closure captured */
+  useEffect(() => { if (shareOpen) refreshStats(); }, [shareOpen, refreshStats]);
+
+  const doPublish = async () => {
+    setShareBusy(true); setShareError("");
+    try {
+      const rec = await publish(currentId, doc, shareRec ? {} : { password: sharePass });
+      setShareRec(rec);
+      setSharePass("");
+      refreshStats();
+    } catch (e) {
+      setShareError(e.message);
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const doRevoke = async () => {
+    if (!window.confirm("Revoke this link? Anyone holding it will stop being able to open the script.")) return;
+    setShareBusy(true); setShareError("");
+    try {
+      await revokeShare(currentId);
+      setShareRec(null);
+      setShareStat(null);
+    } catch (e) {
+      setShareError(e.message);
+    } finally {
+      setShareBusy(false);
+    }
+  };
 
   /* ---------------- find ---------------- */
   /* `find` is null when the bar is closed. Matches are derived, never stored,
@@ -1677,6 +1732,73 @@ export default function Screenwriter() {
               </div>
             )}
           </div>
+
+          {shareEnabled() && (
+            <div className="pop-wrap">
+              <button className={`icon-btn${shareOpen ? " on" : ""}`} title="Share a read-only link"
+                onClick={() => setShareOpen((v) => !v)}>
+                <Link2 size={16} />
+              </button>
+              {shareOpen && (
+                <div className="pop-panel">
+                  <div className="pop-title">Share a link</div>
+                  {!shareRec ? (
+                    <>
+                      <div className="pop-hint" style={{ marginTop: 0 }}>
+                        Publishes a copy of this draft at its own URL. Readers see the script, not your project — and never your other scripts.
+                      </div>
+                      <label className="pop-label">Password (optional)</label>
+                      <input className="pop-input" type="password" value={sharePass} placeholder="Leave blank for anyone with the link"
+                        onChange={(e) => setSharePass(e.target.value)} />
+                      <button className="pop-btn" onClick={doPublish} disabled={shareBusy}>
+                        {shareBusy ? "Publishing…" : "Publish link"}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="share-url-row">
+                        <input className="pop-input" readOnly value={shareURL(shareRec.id)}
+                          onFocus={(e) => e.target.select()} />
+                        <button className="pop-btn" style={{ marginTop: 0 }}
+                          onClick={() => { navigator.clipboard.writeText(shareURL(shareRec.id)); setShareCopied(true); setTimeout(() => setShareCopied(false), 1500); }}>
+                          {shareCopied ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                      <div className="pop-hint" style={{ marginTop: 6 }}>
+                        {shareRec.hasPassword ? "Password protected." : "Anyone with the link can read it."}
+                        {" "}The link shows the draft as it was when you last published.
+                      </div>
+
+                      {shareStat && (
+                        <div className="share-stats">
+                          <div className="share-stat"><b>{shareStat.opens}</b> opened</div>
+                          <div className="share-stat"><b>{shareStat.finished}</b> read to the end</div>
+                          {shareStat.reads && shareStat.reads.length > 0 && (
+                            <div className="share-reads">
+                              {shareStat.reads.slice(0, 6).map((r, i) => (
+                                <div className="share-read" key={i}>
+                                  <span className="share-depth"><span style={{ width: `${Math.round(r.depth * 100)}%` }} /></span>
+                                  <span className="share-read-meta">
+                                    {Math.round(r.depth * 100)}% · {r.seconds < 60 ? `${r.seconds}s` : `${Math.round(r.seconds / 60)}m`} · {timeAgo(r.at)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <button className="pop-btn" onClick={doPublish} disabled={shareBusy}>
+                        {shareBusy ? "Updating…" : "Update link with current draft"}
+                      </button>
+                      <button className="pop-btn danger" onClick={doRevoke} disabled={shareBusy}>Revoke link</button>
+                    </>
+                  )}
+                  {shareError && <div className="pop-error">{shareError}</div>}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="pop-wrap">
             <button className={`icon-btn${verOpen ? " on" : ""}`} title="Versions" onClick={() => setVerOpen((v) => !v)}><History size={16} /></button>

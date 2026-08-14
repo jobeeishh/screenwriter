@@ -356,6 +356,47 @@ export const CSS = `
 .sw-root.night .page-break { border-top-color: #35363C; }
 .sw-root.night .export-btn, .sw-root.night .pop-btn { color: #10131A; }
 
+/* ---- share links ---- */
+.share-url-row { display: flex; gap: 6px; align-items: center; }
+.share-url-row .pop-input { flex: 1; min-width: 0; }
+.pop-btn.danger { color: #B4453C; border-color: rgba(180,69,60,.35); }
+.share-stats { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.share-stat { font-size: 12px; color: var(--ink-dim); }
+.share-stat b { color: var(--text); font-size: 14px; }
+.share-reads { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+.share-read { display: flex; align-items: center; gap: 7px; }
+.share-depth { flex: 0 0 54px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.share-depth span { display: block; height: 100%; background: var(--accent); }
+.share-read-meta { font-size: 10px; color: var(--faint); white-space: nowrap; }
+
+/* the reader's page: no editor chrome, just the script */
+.share-root { display: flex; flex-direction: column; height: 100%; background: var(--bg); }
+.share-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.share-title { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--text); }
+.share-print {
+  font-size: 11px; padding: 5px 10px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+}
+.share-scroll { flex: 1; overflow: auto; padding: 24px 0 60px; }
+.share-scroll .page-body { outline: none; }
+.share-msg {
+  max-width: 380px; margin: 14vh auto; text-align: center; padding: 0 20px;
+  display: flex; flex-direction: column; gap: 10px; align-items: center; color: var(--ink-dim);
+}
+.share-msg h1 { font-size: 15px; color: var(--text); font-weight: 600; }
+.share-msg p { font-size: 12px; line-height: 1.6; }
+.share-msg .theme-input { width: 100%; text-align: center; }
+.share-wrong { color: #B4453C; }
+.share-open {
+  padding: 8px 16px; border-radius: 7px; border: 1px solid var(--accent);
+  background: var(--accent); color: #fff; font-size: 12px;
+}
+.share-open:disabled { opacity: .5; }
+@media print { .share-bar { display: none !important; } .share-scroll { overflow: visible; padding: 0; } }
+
 /* ---- find ---- */
 /* Sticky rather than fixed: it rides the editor column, so it never covers the
    scene board or drifts over the top bar. */

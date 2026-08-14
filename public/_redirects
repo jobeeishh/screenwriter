@@ -1,0 +1,3 @@
+# Cloudflare Pages serves files, not routes. A share link like /s/abc123 is a
+# client-side route, so hand every unmatched path to the app and let it decide.
+/*  /index.html  200
