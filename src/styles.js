@@ -311,10 +311,28 @@ export const CSS = `
 .sw-root.night .page-break { border-top-color: #35363C; }
 .sw-root.night .export-btn, .sw-root.night .pop-btn { color: #10131A; }
 
+/* ---- find ---- */
+/* Sticky rather than fixed: it rides the editor column, so it never covers the
+   scene board or drifts over the top bar. */
+.find-bar {
+  position: sticky; top: 8px; z-index: 30; margin: 0 auto 4px; width: fit-content;
+  display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.12); color: var(--ink-dim);
+}
+.find-bar.night { box-shadow: 0 4px 16px rgba(0,0,0,.45); }
+.find-input {
+  border: none; outline: none; background: transparent; color: var(--text);
+  font: inherit; font-size: 12px; width: 180px; padding: 2px 0;
+}
+.find-input::placeholder { color: var(--faint); }
+.find-count { font-size: 11px; color: var(--faint); min-width: 56px; text-align: right; }
+.find-bar .ghost:disabled { opacity: .35; cursor: default; }
+
 /* ---- print ---- */
 .print-title-page { display: none; }
 @media print {
-  .topbar, .side, .hint-bar, .page-break, .ac-menu { display: none !important; }
+  .topbar, .side, .hint-bar, .page-break, .ac-menu, .find-bar { display: none !important; }
   .sw-root { position: static; overflow: visible; background: #fff; }
   .body { display: block; }
   .editor-scroll { overflow: visible; }

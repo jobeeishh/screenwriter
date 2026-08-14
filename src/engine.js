@@ -387,6 +387,25 @@ export function unpair(blocks, pairId) {
   });
 }
 
+/* ---------------------------------------------------------------- searching */
+/* Matches come back in PLAIN offsets -- the same coordinates the editor places
+   a caret with -- so a hit inside an italic run still selects the right words
+   rather than counting the asterisks that aren't on screen. */
+export function findMatches(blocks, query) {
+  const q = String(query || "").toLowerCase();
+  if (!q) return [];
+  const out = [];
+  (blocks || []).forEach((b) => {
+    const hay = plainText(b.text).toLowerCase();
+    let i = hay.indexOf(q);
+    while (i !== -1) {
+      out.push({ id: b.id, type: b.type, start: i, end: i + q.length });
+      i = hay.indexOf(q, i + q.length);
+    }
+  });
+  return out;
+}
+
 /* ------------------------------------------------------------ text parsing */
 /* Two readers for pasted / imported plain text.
 

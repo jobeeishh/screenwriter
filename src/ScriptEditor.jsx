@@ -245,6 +245,25 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     },
     toggleDual,
     toggleItalic,
+
+    /* search: select the match itself, so you can see what was found and type
+       straight over it. Offsets are plain-text, as findMatches reports them. */
+    revealMatch(id, start, end) {
+      const root = rootRef.current;
+      if (!root) return;
+      const el = root.querySelector(`[data-id="${id}"]`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      const a = pointAt(el, start);
+      const b = pointAt(el, end);
+      if (!a || !b) { setCaret(el, "end"); return; }
+      const r = document.createRange();
+      r.setStart(a.node, a.off);
+      r.setEnd(b.node, b.off);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    },
     root: () => rootRef.current,
 
     /* ------- dictation interface: all DOM mutation stays in here ------- */

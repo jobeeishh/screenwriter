@@ -2,14 +2,14 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload, Clapperboard,
   Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText, History,
-  RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2,
+  RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2, Search,
   MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic, Volume2,
 } from "lucide-react";
 import ScriptEditor from "./ScriptEditor.jsx";
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
-  plainText,
+  plainText, findMatches,
 } from "./engine.js";
 import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope, hashStr } from "./sync.js";
 import { createDictation, createReadback, buildReadbackPlan } from "./dictation.js";
@@ -211,6 +211,43 @@ export default function Screenwriter() {
   streakRef.current = streak;
 
   const scenes = useMemo(() => deriveScenes(doc.blocks), [doc.blocks]);
+
+  /* ---------------- find ---------------- */
+  /* `find` is null when the bar is closed. Matches are derived, never stored,
+     so they follow the script as it is edited underneath them. */
+  const [find, setFind] = useState(null); // { q, idx }
+  const findInputRef = useRef(null);
+  const matches = useMemo(
+    () => (find && find.q ? findMatches(doc.blocks, find.q) : []),
+    [doc.blocks, find && find.q] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const findIdx = find && matches.length ? Math.min(find.idx, matches.length - 1) : 0;
+
+  const gotoMatch = useCallback((i) => {
+    const m = matches[i];
+    if (!m || !editorRef.current) return;
+    setFind((f) => (f ? { ...f, idx: i } : f));
+    editorRef.current.revealMatch(m.id, m.start, m.end);
+  }, [matches]);
+
+  const stepMatch = useCallback((dir) => {
+    if (!matches.length) return;
+    gotoMatch((findIdx + dir + matches.length) % matches.length);
+  }, [matches, findIdx, gotoMatch]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFind((f) => f || { q: "", idx: 0 });
+        setTimeout(() => findInputRef.current && findInputRef.current.select(), 0);
+        return;
+      }
+      if (e.key === "Escape" && find) { e.preventDefault(); setFind(null); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [find]);
   const scriptChars = useMemo(() => new Set(allCharacters(doc.blocks)), [doc.blocks]);
   const allChars = useMemo(
     () => [...new Set([...scriptChars, ...Object.keys(doc.characters || {})])].sort(),
@@ -1800,6 +1837,32 @@ export default function Screenwriter() {
         )}
 
         <main className="editor-scroll">
+          {find && (
+            <div className={`find-bar${night ? " night" : ""}`}>
+              <Search size={13} />
+              <input
+                ref={findInputRef}
+                className="find-input"
+                value={find.q}
+                placeholder="Find in script"
+                spellCheck={false}
+                autoFocus
+                onChange={(e) => setFind({ q: e.target.value, idx: 0 })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); stepMatch(e.shiftKey ? -1 : 1); }
+                  if (e.key === "Escape") { e.preventDefault(); setFind(null); }
+                }}
+              />
+              <span className="find-count">
+                {find.q ? (matches.length ? `${findIdx + 1} of ${matches.length}` : "none") : ""}
+              </span>
+              <button className="ghost" title="Previous (shift+enter)" disabled={!matches.length}
+                onClick={() => stepMatch(-1)}>↑</button>
+              <button className="ghost" title="Next (enter)" disabled={!matches.length}
+                onClick={() => stepMatch(1)}>↓</button>
+              <button className="ghost" title="Close (esc)" onClick={() => setFind(null)}><X size={13} /></button>
+            </div>
+          )}
           {authLost && (
             <button className="reauth-pill" onClick={() => connectDrive(false)}>
               <CloudOff size={13} /> Sync is signed out — tap to reconnect
@@ -1844,7 +1907,7 @@ export default function Screenwriter() {
             />
           </div>
           <div className="hint-bar">
-            enter&thinsp;next element &nbsp;&middot;&nbsp; tab&thinsp;change type &nbsp;&middot;&nbsp; ⌘I&thinsp;italic &nbsp;&middot;&nbsp; ⌘D&thinsp;dual dialogue &nbsp;&middot;&nbsp; ⌘Z&thinsp;undo
+            enter&thinsp;next element &nbsp;&middot;&nbsp; tab&thinsp;change type &nbsp;&middot;&nbsp; ⌘I&thinsp;italic &nbsp;&middot;&nbsp; ⌘F&thinsp;find &nbsp;&middot;&nbsp; ⌘D&thinsp;dual dialogue &nbsp;&middot;&nbsp; ⌘Z&thinsp;undo
           </div>
         </main>
 
