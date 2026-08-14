@@ -431,7 +431,7 @@ export default function Screenwriter() {
     if (!window.confirm(`Delete ${selectedScenes.size} scene${selectedScenes.size > 1 ? "s" : ""}? You can undo with Ctrl+Z.`)) return;
     let blocks = doc.blocks;
     const idxs = scenes
-      .map((s, i) => (s.heading && selectedScenes.has(s.heading.id) ? i : -1))
+      .map((s, i) => (s.anchor && selectedScenes.has(s.anchor.id) ? i : -1))
       .filter((i) => i >= 0)
       .sort((a, b) => b - a);
     idxs.forEach((i) => { blocks = deleteSceneAt(blocks, i); });
@@ -440,7 +440,8 @@ export default function Screenwriter() {
   };
 
   const handleCardClick = (e, i, sc) => {
-    const hid = sc.heading && sc.heading.id;
+    /* a scene with no slugline still has somewhere to jump to */
+    const hid = sc.anchor && sc.anchor.id;
     if (!hid) return;
     if (e.metaKey || e.ctrlKey) {
       setSelectedScenes((prev) => { const n = new Set(prev); n.has(hid) ? n.delete(hid) : n.add(hid); return n; });
@@ -449,7 +450,7 @@ export default function Screenwriter() {
     }
     if (e.shiftKey && selectAnchor.current != null) {
       const [a, b] = [Math.min(selectAnchor.current, i), Math.max(selectAnchor.current, i)];
-      setSelectedScenes(new Set(scenes.slice(a, b + 1).map((s) => s.heading && s.heading.id).filter(Boolean)));
+      setSelectedScenes(new Set(scenes.slice(a, b + 1).map((s) => s.anchor && s.anchor.id).filter(Boolean)));
       return;
     }
     setSelectedScenes(new Set());
@@ -1499,7 +1500,7 @@ export default function Screenwriter() {
     return t.length > 70 ? t.slice(0, 70) + "\u2026" : t;
   };
 
-  const doneCount = scenes.filter((s) => s.heading && s.heading.done).length;
+  const doneCount = scenes.filter((s) => s.anchor && s.anchor.done).length;
 
   /* ============================ render ============================ */
   return (
@@ -1738,7 +1739,12 @@ export default function Screenwriter() {
             </div>
             <div className="cards" onDragLeave={() => setOverIdx(null)}>
               {scenes.map((s, i) => {
-                const h = s.heading;
+                const h = s.anchor;
+                /* Number the cards the way the page numbers them: only a
+                   slugline opens a numbered scene, so an opening image before
+                   the first one is shown without a number rather than
+                   shifting every later scene by one. */
+                const num = s.heading ? scenes.slice(0, i + 1).filter((x) => x.heading).length : null;
                 return (
                   <div key={h ? h.id : `x${i}`} className="card-slot">
                     {h && h.act !== undefined && (
@@ -1764,8 +1770,12 @@ export default function Screenwriter() {
                             {h.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
                           </button>
                         )}
-                        <span className="card-num">{i + 1}</span>
-                        <span className="card-heading">{(h && plainText(h.text).trim()) || "Untitled scene"}</span>
+                        <span className="card-num">{num || "—"}</span>
+                        <span className={`card-heading${s.heading ? "" : " no-slug"}`}>
+                          {s.heading
+                            ? plainText(s.heading.text).trim() || "Untitled scene"
+                            : i === 0 ? "Opening image" : "No slugline"}
+                        </span>
                         <span className="card-actions" onClick={(e) => e.stopPropagation()}>
                           {h && (
                             <button className="ghost" title={h.act !== undefined ? "Remove act flag" : "Add act flag"}

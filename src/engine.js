@@ -235,6 +235,10 @@ export function deriveScenes(blocks) {
   });
   scenes.forEach((s, i) => {
     s.end = i + 1 < scenes.length ? scenes[i + 1].start - 1 : blocks.length - 1;
+    /* Where a scene's notes, act flag and done mark live. A script that opens on
+       an image before any slugline still has a scene there; it just hangs its
+       marks on its first block instead of on a heading it doesn't have. */
+    s.anchor = s.heading || s.blocks[0] || null;
   });
   return scenes;
 }
@@ -254,7 +258,7 @@ export function moveScene(blocks, from, to) {
   const scenes = deriveScenes(blocks);
   const src = scenes[from];
   if (!src) return blocks;
-  const acts = scenes.map((s) => (s.heading ? s.heading.act : undefined));
+  const acts = scenes.map((s) => (s.anchor ? s.anchor.act : undefined));
 
   const chunk = blocks.slice(src.start, src.end + 1);
   const rest = [...blocks.slice(0, src.start), ...blocks.slice(src.end + 1)];
@@ -268,15 +272,15 @@ export function moveScene(blocks, from, to) {
   const out = [...rest.slice(0, insertAt), ...chunk, ...rest.slice(insertAt)];
 
   /* reapply act flags by position, so a flag never travels with a dragged card.
-     clone the headings rather than mutating shared block objects. */
+     clone the anchors rather than mutating shared block objects. */
   const outScenes = deriveScenes(out);
   const patch = new Map();
   outScenes.forEach((s, i) => {
-    if (!s.heading) return;
-    const next = { ...s.heading };
+    if (!s.anchor) return;
+    const next = { ...s.anchor };
     if (acts[i] !== undefined) next.act = acts[i];
     else delete next.act;
-    patch.set(s.heading.id, next);
+    patch.set(s.anchor.id, next);
   });
   return out.map((b) => patch.get(b.id) || b);
 }
@@ -464,6 +468,19 @@ function parseLaidOut(lines, charCol, base) {
    the page, not by the writer, so the next line continues it. */
 const WRAP_COL = 45;
 
+/* Whether blank lines are what separate paragraphs here. If the text never puts
+   one between two paragraphs, then every line IS a paragraph and rejoining long
+   neighbours would run consecutive action beats together. */
+const blankSeparated = (lines) => {
+  let sawText = false, blank = false;
+  for (const l of lines) {
+    if (!l.trim()) { blank = sawText; continue; }
+    if (blank) return true;
+    sawText = true;
+  }
+  return false;
+};
+
 /* Without indentation, what a line IS depends on what came before it: dialogue
    is dialogue because a cue opened the speech. So a blank line must NOT clear
    that context -- it only ends a wrapped paragraph. Clearing it is what turned
@@ -471,6 +488,7 @@ const WRAP_COL = 45;
    blank line between a cue and its dialogue. */
 function parseFlushLeft(lines) {
   const blocks = [];
+  const rejoin = blankSeparated(lines);
   let last = null;
   let gap = true;   // blank line since the previous one?
   let prevLen = 0;
@@ -488,7 +506,7 @@ function parseFlushLeft(lines) {
     /* a cue opens a speech, blank line or not */
     else if (last === "character" || last === "parenthetical") push("dialogue", t);
     else if (last === "dialogue" && !gap && !isCaps) append(t);
-    else if (last === "action" && !gap && !isCaps && prevLen >= WRAP_COL) append(t);
+    else if (last === "action" && rejoin && !gap && !isCaps && prevLen >= WRAP_COL) append(t);
     else if (looksLikeCue(t)) push("character", t);
     else push("action", t);
 

@@ -177,6 +177,8 @@ export const CSS = `
 .scene-check { display: flex; align-items: center; background: transparent; border: none; padding: 0; color: var(--faint); flex: 0 0 auto; }
 .scene-check.done { color: #3E7A52; }
 .card:has(.scene-check.done) .card-heading { color: var(--faint); }
+/* a scene with no slugline: named by what it is, not by a heading it lacks */
+.card-heading.no-slug { color: var(--faint); font-style: italic; text-transform: none; letter-spacing: 0; }
 .scene-progress { color: var(--accent); margin-left: 4px; }
 
 .board.full { position: absolute; z-index: 6; inset: 0; width: 100%; flex-basis: 100%; border-right: none; }
