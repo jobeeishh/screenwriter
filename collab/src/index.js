@@ -87,6 +87,15 @@ export class Room extends DurableObject {
 const MAX_DOC = 4_000_000;   // a very long script, JSON-encoded
 const MAX_READS = 200;       // bound the tally; oldest sessions fall off
 
+/* Comments are written by readers, who are by definition unauthenticated --
+   anyone holding the link can post. So everything about them is bounded, and
+   they only exist at all when the writer has switched them on. */
+const MAX_COMMENTS = 500;
+const MAX_COMMENT = 1500;
+const MAX_NAME = 60;
+
+const clip = (s, n) => String(s == null ? "" : s).slice(0, n);
+
 const enc = new TextEncoder();
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 const sha = async (s) => hex(await crypto.subtle.digest("SHA-256", enc.encode(s)));
@@ -121,13 +130,52 @@ export class Share extends DurableObject {
       ownerKey: meta ? meta.ownerKey : (body.ownerKey || rand()),
       salt,
       pass,
-      title: String(body.title || "Untitled").slice(0, 200),
+      title: clip(body.title || "Untitled", 200),
+      comments: body.comments === undefined ? !!(meta && meta.comments) : !!body.comments,
       createdAt: meta ? meta.createdAt : Date.now(),
       updatedAt: Date.now(),
     };
     await this.ctx.storage.put("meta", next);
     await this.ctx.storage.put("doc", doc);
-    return json({ ok: true, ownerKey: next.ownerKey, hasPassword: !!next.pass });
+    return json({ ok: true, ownerKey: next.ownerKey, hasPassword: !!next.pass, comments: next.comments });
+  }
+
+  /* A reader leaves a note on one line. Rejected outright when the writer
+     hasn't opened comments, so switching them off closes the door rather than
+     just hiding what is behind it. */
+  async comment(body) {
+    const meta = await this.meta();
+    if (!meta) return json({ error: "gone" }, 404);
+    if (!meta.comments) return json({ error: "comments are closed" }, 403);
+    if (meta.pass && !same(meta.pass, await sha(meta.salt + (body.password || ""))))
+      return json({ needsPassword: true }, 401);
+
+    const text = clip(body.text, MAX_COMMENT).trim();
+    const blockId = clip(body.blockId, 64);
+    if (!text || !blockId) return json({ error: "empty" }, 400);
+
+    const list = (await this.ctx.storage.get("comments")) || [];
+    if (list.length >= MAX_COMMENTS) return json({ error: "this script has all the notes it can hold" }, 429);
+
+    const c = {
+      id: rand(),
+      at: Date.now(),
+      name: clip(body.name, MAX_NAME).trim() || "Anonymous",
+      blockId,
+      text,
+    };
+    list.push(c);
+    await this.ctx.storage.put("comments", list);
+    return json({ ok: true, comment: c });
+  }
+
+  async uncomment(body) {
+    const meta = await this.meta();
+    if (!meta) return json({ error: "gone" }, 404);
+    if (!same(meta.ownerKey, body.ownerKey || "")) return json({ error: "not yours" }, 403);
+    const list = (await this.ctx.storage.get("comments")) || [];
+    await this.ctx.storage.put("comments", list.filter((c) => c.id !== body.commentId));
+    return json({ ok: true });
   }
 
   async open(body) {
@@ -137,7 +185,13 @@ export class Share extends DurableObject {
       return json({ needsPassword: true }, 401);
     const doc = await this.ctx.storage.get("doc");
     if (!doc) return json({ error: "gone" }, 404);
-    return json({ title: meta.title, doc: JSON.parse(doc) });
+    return json({
+      title: meta.title,
+      doc: JSON.parse(doc),
+      comments: meta.comments,
+      /* readers see each other's notes -- that is the point of a table read */
+      notes: meta.comments ? (await this.ctx.storage.get("comments")) || [] : [],
+    });
   }
 
   /* One record per reader session, updated in place, so re-pinging while
@@ -173,10 +227,12 @@ export class Share extends DurableObject {
     return json({
       title: meta.title,
       hasPassword: !!meta.pass,
+      comments: !!meta.comments,
       updatedAt: meta.updatedAt,
       opens: list.length,
       finished: list.filter((r) => r.depth >= 0.9).length,
       reads: list.slice(0, 50),
+      notes: ((await this.ctx.storage.get("comments")) || []).slice().reverse(),
     });
   }
 
@@ -194,12 +250,14 @@ export class Share extends DurableObject {
     let body = {};
     try { body = await request.json(); } catch {}
     switch (action) {
-      case "put":    return this.put(body);
-      case "open":   return this.open(body);
-      case "read":   return this.read(body);
-      case "stats":  return this.stats(body);
-      case "revoke": return this.revoke(body);
-      default:       return json({ error: "not found" }, 404);
+      case "put":       return this.put(body);
+      case "open":      return this.open(body);
+      case "read":      return this.read(body);
+      case "stats":     return this.stats(body);
+      case "revoke":    return this.revoke(body);
+      case "comment":   return this.comment(body);
+      case "uncomment": return this.uncomment(body);
+      default:          return json({ error: "not found" }, 404);
     }
   }
 }
@@ -237,7 +295,7 @@ export default {
     if (room) return env.ROOM.getByName(room[1]).fetch(request);
 
     /* /share/<id>/<action>, all POST: a password must never ride in a URL. */
-    const share = url.pathname.match(/^\/share\/([A-Za-z0-9_-]{1,64})\/(put|open|read|stats|revoke)$/);
+    const share = url.pathname.match(/^\/share\/([A-Za-z0-9_-]{1,64})\/(put|open|read|stats|revoke|comment|uncomment)$/);
     if (share) {
       if (request.method !== "POST") return withCORS(json({ error: "use POST" }, 405), origin);
       return withCORS(await env.SHARE.getByName(share[1]).fetch(request), origin);

@@ -6,7 +6,7 @@ import {
   MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic, Volume2,
 } from "lucide-react";
 import ScriptEditor from "./ScriptEditor.jsx";
-import { shareEnabled, shareRecord, shareURL, publish, shareStats, revokeShare } from "./share.js";
+import { shareEnabled, shareRecord, shareURL, publish, shareStats, revokeShare, deleteComment } from "./share.js";
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
@@ -223,12 +223,23 @@ export default function Screenwriter() {
   const [shareError, setShareError] = useState("");
   const [shareCopied, setShareCopied] = useState(false);
   const [shareStat, setShareStat] = useState(null);
+  const [shareComments, setShareComments] = useState(false);
 
   useEffect(() => {
-    setShareRec(currentId ? shareRecord(currentId) : null);
+    const rec = currentId ? shareRecord(currentId) : null;
+    setShareRec(rec);
+    setShareComments(!!(rec && rec.comments));
     setShareStat(null);
     setShareError("");
   }, [currentId]);
+
+  /* the line a note is attached to, for the owner's list */
+  const noteLine = useCallback((blockId) => {
+    const b = doc.blocks.find((x) => x.id === blockId);
+    if (!b) return "a line that has since been cut";
+    const t = plainText(b.text).trim();
+    return t.length > 44 ? t.slice(0, 44) + "…" : t || "an empty line";
+  }, [doc.blocks]);
 
   const refreshStats = useCallback(async () => {
     if (!currentId || !shareRecord(currentId)) return;
@@ -242,8 +253,12 @@ export default function Screenwriter() {
   const doPublish = async () => {
     setShareBusy(true); setShareError("");
     try {
-      const rec = await publish(currentId, doc, shareRec ? {} : { password: sharePass });
+      /* first publish carries both settings; re-publishing only replaces the
+         draft, so a password or an open comment thread isn't silently reset */
+      const rec = await publish(currentId, doc,
+        shareRec ? {} : { password: sharePass, comments: shareComments });
       setShareRec(rec);
+      setShareComments(!!rec.comments);
       setSharePass("");
       refreshStats();
     } catch (e) {
@@ -251,6 +266,28 @@ export default function Screenwriter() {
     } finally {
       setShareBusy(false);
     }
+  };
+
+  const toggleComments = async (on) => {
+    setShareComments(on);
+    setShareBusy(true); setShareError("");
+    try {
+      const rec = await publish(currentId, doc, { comments: on });
+      setShareRec(rec);
+      refreshStats();
+    } catch (e) {
+      setShareError(e.message);
+      setShareComments(!on); // put the box back if the worker refused
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const dropNote = async (commentId) => {
+    try {
+      await deleteComment(currentId, commentId);
+      setShareStat((s) => (s ? { ...s, notes: s.notes.filter((n) => n.id !== commentId) } : s));
+    } catch { /* it will be gone on the next refresh anyway */ }
   };
 
   const doRevoke = async () => {
@@ -1740,7 +1777,7 @@ export default function Screenwriter() {
                 <Link2 size={16} />
               </button>
               {shareOpen && (
-                <div className="pop-panel">
+                <div className="pop-panel share-panel">
                   <div className="pop-title">Share a link</div>
                   {!shareRec ? (
                     <>
@@ -1750,24 +1787,55 @@ export default function Screenwriter() {
                       <label className="pop-label">Password (optional)</label>
                       <input className="pop-input" type="password" value={sharePass} placeholder="Leave blank for anyone with the link"
                         onChange={(e) => setSharePass(e.target.value)} />
+                      <label className="pop-check">
+                        <input type="checkbox" checked={shareComments}
+                          onChange={(e) => setShareComments(e.target.checked)} />
+                        <span>Let readers leave notes on any line</span>
+                      </label>
                       <button className="pop-btn" onClick={doPublish} disabled={shareBusy}>
                         {shareBusy ? "Publishing…" : "Publish link"}
                       </button>
                     </>
                   ) : (
                     <>
-                      <div className="share-url-row">
-                        <input className="pop-input" readOnly value={shareURL(shareRec.id)}
-                          onFocus={(e) => e.target.select()} />
-                        <button className="pop-btn" style={{ marginTop: 0 }}
-                          onClick={() => { navigator.clipboard.writeText(shareURL(shareRec.id)); setShareCopied(true); setTimeout(() => setShareCopied(false), 1500); }}>
-                          {shareCopied ? "Copied" : "Copy"}
-                        </button>
-                      </div>
+                      {/* the address gets the full width: it is the thing you
+                          came here to read, and it does not fit beside a button */}
+                      <input className="pop-input share-url" readOnly value={shareURL(shareRec.id)}
+                        title={shareURL(shareRec.id)} onFocus={(e) => e.target.select()} />
+                      <button className="pop-btn secondary"
+                        onClick={() => { navigator.clipboard.writeText(shareURL(shareRec.id)); setShareCopied(true); setTimeout(() => setShareCopied(false), 1500); }}>
+                        {shareCopied ? "Copied" : "Copy link"}
+                      </button>
                       <div className="pop-hint" style={{ marginTop: 6 }}>
                         {shareRec.hasPassword ? "Password protected." : "Anyone with the link can read it."}
                         {" "}The link shows the draft as it was when you last published.
                       </div>
+                      <label className="pop-check">
+                        <input type="checkbox" checked={shareComments} disabled={shareBusy}
+                          onChange={(e) => toggleComments(e.target.checked)} />
+                        <span>Let readers leave notes on any line</span>
+                      </label>
+
+                      {shareStat && shareStat.notes && shareStat.notes.length > 0 && (
+                        <div className="share-notes">
+                          <div className="pop-label" style={{ marginTop: 10 }}>
+                            {shareStat.notes.length} note{shareStat.notes.length === 1 ? "" : "s"}
+                          </div>
+                          {shareStat.notes.map((n) => (
+                            <div className="share-note" key={n.id}>
+                              <div className="share-note-top">
+                                <button className="share-note-jump" title="Go to this line"
+                                  onClick={() => { setShareOpen(false); editorRef.current && editorRef.current.focusBlock(n.blockId); }}>
+                                  {noteLine(n.blockId)}
+                                </button>
+                                <button className="ghost danger" title="Delete note"
+                                  onClick={() => dropNote(n.id)}><X size={11} /></button>
+                              </div>
+                              <div className="share-note-body"><b>{n.name}</b> {n.text}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
 
                       {shareStat && (
                         <div className="share-stats">

@@ -43,14 +43,16 @@ const newId = () =>
 
 export const shareURL = (id) => `${location.origin}/s/${id}`;
 
-/* Publish (or re-publish) the current draft. Passing password:"" clears one. */
-export async function publish(scriptId, doc, { password } = {}) {
+/* Publish (or re-publish) the current draft. Passing password:"" clears one;
+   omitting either option leaves that setting as it was. */
+export async function publish(scriptId, doc, { password, comments } = {}) {
   const prev = shareRecord(scriptId);
   const id = prev ? prev.id : newId();
   const ownerKey = prev ? prev.ownerKey : null;
   const res = await post(id, "put", {
     doc, ownerKey, title: doc.title || "Untitled",
     ...(password === undefined ? {} : { password }),
+    ...(comments === undefined ? {} : { comments }),
   });
   if (!res.ok) {
     /* the worker answers 404 for an unknown route, which is exactly what an
@@ -58,10 +60,36 @@ export async function publish(scriptId, doc, { password } = {}) {
     if (res.status === 404) throw new Error("The collab worker needs redeploying before links can be published.");
     throw new Error(res.data.error || "Could not publish that link.");
   }
-  const rec = { id, ownerKey: res.data.ownerKey, hasPassword: !!res.data.hasPassword };
+  const rec = {
+    id,
+    ownerKey: res.data.ownerKey,
+    hasPassword: !!res.data.hasPassword,
+    comments: !!res.data.comments,
+  };
   remember(scriptId, rec);
   return rec;
 }
+
+/* ---------------------------------------------------------------- comments */
+export async function addComment(id, { blockId, text, name, password }) {
+  const res = await post(id, "comment", { blockId, text, name, password });
+  if (!res.ok) throw new Error(res.data.error || "Could not leave that note.");
+  return res.data.comment;
+}
+
+export async function deleteComment(scriptId, commentId) {
+  const rec = shareRecord(scriptId);
+  if (!rec) return;
+  await post(rec.id, "uncomment", { ownerKey: rec.ownerKey, commentId });
+}
+
+/* the reader's name, remembered so they only type it once */
+export const readerName = () => {
+  try { return localStorage.getItem("sw-reader-name") || ""; } catch { return ""; }
+};
+export const setReaderName = (n) => {
+  try { localStorage.setItem("sw-reader-name", n); } catch {}
+};
 
 export async function openShare(id, password) {
   const res = await post(id, "open", password === undefined ? {} : { password });

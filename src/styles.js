@@ -357,9 +357,28 @@ export const CSS = `
 .sw-root.night .export-btn, .sw-root.night .pop-btn { color: #10131A; }
 
 /* ---- share links ---- */
-.share-url-row { display: flex; gap: 6px; align-items: center; }
-.share-url-row .pop-input { flex: 1; min-width: 0; }
+/* wider than the other popovers, because a share URL is ~46 characters and
+   there is no useful way to abbreviate one you are about to send someone */
+.pop-panel.share-panel { width: 360px; }
+.share-url {
+  font-family: 'Courier Prime', monospace; font-size: 11px; letter-spacing: -.01em;
+  direction: ltr; text-overflow: ellipsis;
+}
 .pop-btn.danger { color: #B4453C; border-color: rgba(180,69,60,.35); }
+.pop-check { display: flex; align-items: center; gap: 7px; margin-top: 9px; font-size: 12px; color: var(--text); cursor: pointer; }
+.pop-check input { accent-color: var(--accent); }
+
+.share-notes { max-height: 210px; overflow: auto; margin-top: 2px; }
+.share-note { border-top: 1px solid var(--line); padding: 7px 0; }
+.share-note-top { display: flex; align-items: center; gap: 6px; }
+.share-note-jump {
+  flex: 1; min-width: 0; text-align: left; background: transparent; border: none; padding: 0;
+  font-size: 10px; color: var(--faint); font-style: italic;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.share-note-jump:hover { color: var(--accent); }
+.share-note-body { font-size: 12px; line-height: 1.5; color: var(--ink-dim); margin-top: 2px; }
+.share-note-body b { color: var(--text); }
 .share-stats { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .share-stat { font-size: 12px; color: var(--ink-dim); }
 .share-stat b { color: var(--text); font-size: 14px; }
@@ -396,6 +415,60 @@ export const CSS = `
 }
 .share-open:disabled { opacity: .5; }
 @media print { .share-bar { display: none !important; } .share-scroll { overflow: visible; padding: 0; } }
+.share-bar-right { display: flex; align-items: center; gap: 10px; }
+.share-notes-count { font-size: 11px; color: var(--faint); }
+
+/* ---- notes on a shared script ----
+   An annotated line is marked with an outline rather than a pseudo-element or
+   a background: ::before and ::after are already carrying revision asterisks,
+   scene numbers and CONT'D, and the background is carrying the revision bar. */
+.share-commentable .blk { cursor: pointer; border-radius: 2px; }
+.share-commentable .blk:hover { box-shadow: 0 0 0 3px rgba(44,74,115,.07); }
+.blk[data-notes] { outline: 1px dashed rgba(44,74,115,.5); outline-offset: 3px; }
+.sw-root.night .blk[data-notes] { outline-color: rgba(127,163,212,.55); }
+.blk.is-open { outline: 1px solid var(--accent); outline-offset: 3px; }
+
+.note-composer {
+  position: sticky; bottom: 0; z-index: 12; margin: 0 auto; max-width: 640px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px 10px 0 0;
+  box-shadow: 0 -6px 24px rgba(20,20,15,.16); padding: 11px 13px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.note-on { font-size: 11px; color: var(--faint); font-style: italic; }
+.note-existing { font-size: 12px; color: var(--ink-dim); line-height: 1.5; }
+.note-who { font-weight: 600; color: var(--text); margin-right: 5px; }
+.note-fields { display: flex; gap: 8px; align-items: stretch; }
+.note-name {
+  flex: 0 0 120px; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; color: var(--text); outline: none;
+}
+.note-text-input {
+  flex: 1; min-width: 0; resize: vertical; font: inherit; font-size: 12px; line-height: 1.5;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; color: var(--text); outline: none;
+}
+.note-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.note-cancel, .note-send {
+  font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--panel2); color: var(--text);
+}
+.note-send { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.note-send:disabled { opacity: .5; }
+.note-error { font-size: 11px; color: #B4453B; }
+
+.note-list { max-width: 6in; margin: 28px auto 0; padding: 0 12px; }
+.note-list-head {
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--faint); border-top: 1px solid var(--line); padding-top: 10px; margin-bottom: 6px;
+}
+.note-item {
+  display: block; width: 100%; text-align: left; background: transparent; border: none;
+  padding: 6px 0; font-size: 12px; line-height: 1.5; color: var(--ink-dim);
+  border-bottom: 1px solid var(--line);
+}
+.note-item:hover { color: var(--text); }
+.note-text { white-space: pre-wrap; }
+@media print { .note-composer, .note-list { display: none !important; } .blk[data-notes] { outline: none; } }
 
 /* ---- find ---- */
 /* Sticky rather than fixed: it rides the editor column, so it never covers the
