@@ -123,7 +123,7 @@ const BAR_TYPES = [
   ["transition", "Transition"],
 ];
 
-const isCoarse = () =>
+export const isCoarse = () =>
   typeof window !== "undefined" &&
   typeof window.matchMedia === "function" &&
   window.matchMedia("(pointer: coarse)").matches;
@@ -261,6 +261,33 @@ const ScriptEditor = forwardRef(function ScriptEditor(
     },
     toggleDual,
     toggleItalic,
+
+    /* Where the caret is right now, asked for rather than pushed: the
+       selectionchange path is rAF-driven and reports nothing while the tab is
+       in the background, which is exactly when we want to write down where you
+       had got to. */
+    getCaret() {
+      const root = rootRef.current;
+      if (!root) return null;
+      const blk = currentBlock(root) ||
+        (lastBlkIdRef.current && root.querySelector(`[data-id="${lastBlkIdRef.current}"]`));
+      if (!blk) return null;
+      return { blkId: blk.dataset.id, off: currentBlock(root) === blk ? caretOffset(blk) : 0 };
+    },
+
+    /* Put the caret back where it was on the last visit. `focus` is the
+       caller's call: on a touch device it would throw the keyboard up over the
+       page the instant you arrived. Returns false if that line is gone. */
+    restoreCaret(id, offset, focus) {
+      const root = rootRef.current;
+      if (!root) return false;
+      const el = root.querySelector(`[data-id="${id}"]`);
+      if (!el) return false;
+      if (focus) root.focus({ preventScroll: true });
+      setCaret(el, Math.max(0, Math.min(offset || 0, el.textContent.length)));
+      lastBlkIdRef.current = id;
+      return true;
+    },
 
     /* search: select the match itself, so you can see what was found and type
        straight over it. Offsets are plain-text, as findMatches reports them. */

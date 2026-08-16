@@ -5,7 +5,7 @@ import {
   RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2, Search, Link2,
   MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic, Volume2,
 } from "lucide-react";
-import ScriptEditor from "./ScriptEditor.jsx";
+import ScriptEditor, { isCoarse } from "./ScriptEditor.jsx";
 import { shareEnabled, shareRecord, shareURL, publish, shareStats, revokeShare, deleteComment } from "./share.js";
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
@@ -45,6 +45,27 @@ const DICT_KEY = "screenwriter-dictation-v1";
 const TOKEN_KEY = "screenwriter-drive-token";
 const OLD_KEY = "screenwriter-doc-v1";
 const CURRENT_KEY = "screenwriter-current-v1";
+const PLACE_KEY = "screenwriter-place-v1";
+
+/* Where you were in each script: the line at the top of the window, how far it
+   sat below the top edge, and where the caret was. Anchored to a line rather
+   than to a pixel offset, so coming back on a narrower window -- or after the
+   text above has grown -- still lands on the same words instead of the same
+   scroll distance. */
+const loadPlaces = () => {
+  try { return JSON.parse(storage.api.getItem(PLACE_KEY) || "{}") || {}; } catch { return {}; }
+};
+const savePlace = (id, place) => {
+  if (!id) return;
+  try {
+    const all = loadPlaces();
+    all[id] = place;
+    /* keep this from growing forever as scripts come and go */
+    const ids = Object.keys(all);
+    if (ids.length > 40) delete all[ids[0]];
+    storage.api.setItem(PLACE_KEY, JSON.stringify(all));
+  } catch {}
+};
 const docKey = (id) => `screenwriter-doc-v1:${id}`;
 
 const loadLibrary = () => {
@@ -187,6 +208,107 @@ export default function Screenwriter() {
      of the six places that switch projects, so a new one can't forget to. */
   useEffect(() => {
     if (currentId) { try { storage.api.setItem(CURRENT_KEY, currentId); } catch {} }
+  }, [currentId]);
+
+  /* ---------------- where you left off ---------------- */
+  const scrollRef = useRef(null);
+  const placeSaveRef = useRef(null);
+  const restoredRef = useRef(null);   // project id we've already restored
+
+  /* The line at the top of the window, and how far below the top edge it sits.
+     Reading it costs a couple of rects, so it happens on a debounce. */
+  const capturePlace = useCallback(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || !currentId) return;
+    /* Never write down a position before the saved one has been used: on the
+       way in the page is still at the top, and recording that would erase the
+       place we are about to restore. */
+    if (restoredRef.current !== currentId) return;
+    const top = scroller.getBoundingClientRect().top;
+    let anchor = null;
+    for (const el of scroller.querySelectorAll(".blk")) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom > top) { anchor = { id: el.dataset.id, delta: Math.round(r.top - top) }; break; }
+    }
+    const ed = editorRef.current;
+    savePlace(currentId, {
+      anchor,
+      scrollTop: Math.round(scroller.scrollTop),
+      caret: (ed && ed.getCaret && ed.getCaret()) || null,
+    });
+  }, [currentId]);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const schedule = () => {
+      clearTimeout(placeSaveRef.current);
+      placeSaveRef.current = setTimeout(capturePlace, 400);
+    };
+    const now = () => { clearTimeout(placeSaveRef.current); capturePlace(); };
+    scroller.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("pagehide", now);
+    const onVis = () => { if (document.visibilityState === "hidden") now(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearTimeout(placeSaveRef.current);
+      scroller.removeEventListener("scroll", schedule);
+      window.removeEventListener("pagehide", now);
+      document.removeEventListener("visibilitychange", onVis);
+      capturePlace(); // switching projects: keep the place we're leaving
+    };
+  }, [capturePlace]);
+
+  /* Restore once per project open -- not on every version bump, or an edit
+     that rebuilds the DOM would yank you back to where you arrived. */
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || !currentId || restoredRef.current === currentId) return;
+    const place = loadPlaces()[currentId];
+
+    /* Putting the line back under the top edge is idempotent, so it is applied
+       again as the page settles: a webfont arriving, or a narrower window
+       rewrapping the text, moves everything after the first attempt and would
+       otherwise leave you a few lines adrift. Any real input stops it, so a
+       late correction can never yank the page out from under you. */
+    let done = false;
+    const timers = [];
+    const apply = () => {
+      if (done) return;
+      const el = place.anchor && scroller.querySelector(`[data-id="${place.anchor.id}"]`);
+      if (el) {
+        const top = scroller.getBoundingClientRect().top;
+        scroller.scrollTop += el.getBoundingClientRect().top - top - place.anchor.delta;
+      } else if (place.scrollTop) {
+        scroller.scrollTop = place.scrollTop;
+      }
+    };
+    const stop = () => { done = true; };
+    const inputs = ["wheel", "touchstart", "keydown", "mousedown"];
+
+    const t = setTimeout(() => {
+      /* marked here rather than above, so a cancelled run (StrictMode mounts
+         every effect twice) leaves the next one free to try again */
+      restoredRef.current = currentId;
+      if (!place) return;
+      const ed = editorRef.current;
+      /* caret first: focusing scrolls it into view, and the scroll we actually
+         want is applied after. Never on touch -- it summons the keyboard. */
+      if (place.caret && ed && ed.restoreCaret) {
+        ed.restoreCaret(place.caret.blkId, place.caret.off, !isCoarse());
+      }
+      inputs.forEach((e) => window.addEventListener(e, stop, { once: true, passive: true }));
+      apply();
+      timers.push(setTimeout(apply, 250));
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(apply);
+    }, 60);
+
+    return () => {
+      clearTimeout(t);
+      timers.forEach(clearTimeout);
+      done = true;
+      inputs.forEach((e) => window.removeEventListener(e, stop));
+    };
   }, [currentId]);
   const [saveState, setSaveState] = useState("saved");
 
@@ -2092,7 +2214,7 @@ export default function Screenwriter() {
           </aside>
         )}
 
-        <main className="editor-scroll">
+        <main className="editor-scroll" ref={scrollRef}>
           {find && (
             <div className={`find-bar${night ? " night" : ""}`}>
               <Search size={13} />
