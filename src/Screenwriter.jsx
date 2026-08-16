@@ -44,6 +44,7 @@ const COLLAB_NAME_KEY = "screenwriter-collab-name";
 const DICT_KEY = "screenwriter-dictation-v1";
 const TOKEN_KEY = "screenwriter-drive-token";
 const OLD_KEY = "screenwriter-doc-v1";
+const CURRENT_KEY = "screenwriter-current-v1";
 const docKey = (id) => `screenwriter-doc-v1:${id}`;
 
 const loadLibrary = () => {
@@ -62,7 +63,15 @@ const deleteProjectDoc = (id) => { try { storage.api.removeItem(docKey(id)); } c
 
 function initLibrary() {
   let lib = loadLibrary();
-  if (lib.length) return { library: lib, currentId: lib[0].id };
+  if (lib.length) {
+    /* Reopen whatever was open last. Falling back to the first project only
+       when that one is gone: otherwise every reload -- including the one after
+       signing back in to Drive -- quietly moves you to a different script. */
+    let last = null;
+    try { last = storage.api.getItem(CURRENT_KEY); } catch {}
+    const id = lib.some((p) => p.id === last) ? last : lib[0].id;
+    return { library: lib, currentId: id };
+  }
   let legacy = null;
   try {
     const raw = storage.api.getItem(OLD_KEY);
@@ -173,6 +182,12 @@ export default function Screenwriter() {
   const [currentId, setCurrentId] = useState(initRef.current.currentId);
   const [doc, setDoc] = useState(() => loadProjectDoc(initRef.current.currentId) || DEFAULT_DOC());
   const [version, setVersion] = useState(0); // bump = rebuild editor DOM
+
+  /* Remember which project is open. One effect rather than a save beside each
+     of the six places that switch projects, so a new one can't forget to. */
+  useEffect(() => {
+    if (currentId) { try { storage.api.setItem(CURRENT_KEY, currentId); } catch {} }
+  }, [currentId]);
   const [saveState, setSaveState] = useState("saved");
 
   const [boardOpen, setBoardOpen] = useState(() => (typeof window !== "undefined" ? window.innerWidth > 980 : true));
