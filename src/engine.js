@@ -56,6 +56,42 @@ export const revisionLabel = (key) => {
   return r ? r.label : "";
 };
 
+/* -------------------------------------------------------------- card colour
+   What a colour MEANS is the writer's business -- a storyline, a POV, a
+   timeline -- so the names live in the doc, per script, and default to none.
+   Deliberately not the revision palette: those are paper colours with a fixed
+   industry meaning, and confusing the two would be worse than having fewer. */
+export const CARD_COLORS = ["rose", "amber", "olive", "teal", "sky", "indigo", "plum", "slate"];
+
+/* --------------------------------------------------------------- scene size
+   Eighths of a page, the unit a schedule is built in. Estimated from the text
+   rather than measured off the page, so it holds for scenes you can't see --
+   the whole board at once, which is the point of a board. */
+const WRAP = { action: 61, dialogue: 35, parenthetical: 25, character: 38, heading: 58, transition: 58 };
+const LINES_PER_PAGE = 55;
+const LEADS = { heading: 2, action: 1, character: 1, transition: 1 }; // blank lines above
+
+export function sceneLines(blocks) {
+  let lines = 0;
+  (blocks || []).forEach((b) => {
+    const t = plainText(b.text).trim();
+    if (!t) return;
+    lines += Math.max(1, Math.ceil(t.length / (WRAP[b.type] || 61)));
+    lines += LEADS[b.type] || 0;
+  });
+  return lines;
+}
+
+export const sceneEighths = (blocks) =>
+  Math.max(1, Math.round((sceneLines(blocks) / LINES_PER_PAGE) * 8));
+
+export function formatEighths(e) {
+  const pages = Math.floor(e / 8);
+  const rem = e % 8;
+  if (!pages) return `${rem}/8`;
+  return rem ? `${pages} ${rem}/8` : `${pages}`;
+}
+
 /* ----------------------------------------------------------------- emphasis
    Italics ride inside block.text as fountain's *asterisks*, so a block stays
    one plain string. Sync, undo, autosave, search and every export keep working
@@ -203,6 +239,7 @@ export const DEFAULT_DOC = () => ({
   treatment: "",
   titlePage: { byline: "", contact: "" },
   characters: {},
+  cardLabels: {}, // card colour -> what it means in THIS script
   versions: [],
   blocks: [newBlock("heading", ""), newBlock("action", "")],
 });

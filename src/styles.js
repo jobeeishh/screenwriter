@@ -191,6 +191,63 @@ export const CSS = `
 .card:has(.scene-check.done) .card-heading { color: var(--faint); }
 /* a scene with no slugline: named by what it is, not by a heading it lacks */
 .card-heading.no-slug { color: var(--faint); font-style: italic; text-transform: none; letter-spacing: 0; }
+
+/* ---- card colours ----
+   Yours to mean whatever you decide, so the palette is broad and evenly
+   weighted rather than semantic. Distinct from the revision paper colours,
+   which have a fixed industry meaning and must not be confused with these. */
+[data-card-color="rose"]   { --card: #C4626E; }
+[data-card-color="amber"]  { --card: #C08A3E; }
+[data-card-color="olive"]  { --card: #7D8C4A; }
+[data-card-color="teal"]   { --card: #3F8C86; }
+[data-card-color="sky"]    { --card: #4C82B8; }
+[data-card-color="indigo"] { --card: #6A6BB0; }
+[data-card-color="plum"]   { --card: #96599B; }
+[data-card-color="slate"]  { --card: #6B7683; }
+
+/* the stripe carries the colour; the tint only hints at it, so a coloured card
+   is still a card you can read */
+.card.tinted { border-left: 3px solid var(--card); }
+.card.tinted .card-heading { color: var(--text); }
+
+.swatch-tray { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.swatch {
+  width: 17px; height: 17px; border-radius: 5px; padding: 0; cursor: pointer;
+  background: var(--card, transparent); border: 1px solid var(--line);
+  font-size: 10px; line-height: 1; color: var(--faint);
+}
+.swatch.on { outline: 2px solid var(--text); outline-offset: 1px; }
+.swatch.none { background: transparent; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 6px 12px 8px; border-bottom: 1px solid var(--line); }
+.legend-item { display: flex; align-items: center; gap: 5px; }
+.legend-dot { width: 9px; height: 9px; border-radius: 3px; background: var(--card); flex: 0 0 auto; }
+.legend-label {
+  background: transparent; border: none; outline: none; color: var(--dim);
+  font-size: 10px; width: 74px; padding: 1px 0;
+}
+.legend-label::placeholder { color: var(--faint); font-style: italic; }
+
+/* ---- expanded cards ---- */
+.cards.big .card { padding: 11px 12px 10px; }
+.card-note.big {
+  display: block; width: 100%; margin-top: 6px; resize: vertical; min-height: 2.6em;
+  background: transparent; border: none; outline: none; font: inherit;
+  font-size: 11px; color: var(--dim); line-height: 1.5;
+}
+.card-preview {
+  margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--line);
+  font-size: 10.5px; line-height: 1.55; color: var(--faint);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.card-foot { display: flex; gap: 8px; align-items: baseline; margin-top: 7px; font-size: 9.5px; color: var(--faint); }
+.card-len { flex: 0 0 auto; letter-spacing: .04em; }
+.card-cast { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: .04em; }
+
+/* full-screen board: expanded cards get room to be a wall of index cards */
+.side.board.full .cards.big { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; align-content: start; }
+.side.board.full .cards.big .card { margin-bottom: 0; }
+.side.board.full .cards.big .card-slot { display: flex; flex-direction: column; }
 .scene-progress { color: var(--accent); margin-left: 4px; }
 
 .board.full { position: absolute; z-index: 6; inset: 0; width: 100%; flex-basis: 100%; border-right: none; }

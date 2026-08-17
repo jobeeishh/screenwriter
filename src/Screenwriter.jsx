@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Download, Plus, Users, X, Trash2, Flag, FileJson, Upload, Clapperboard,
   Circle, FolderOpen, Copy, Cloud, CloudOff, Columns, FileText, History,
-  RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2, Search, Link2,
+  RotateCcw, SeparatorHorizontal, Bold, Italic, List, Maximize2, CheckCircle2, Search, Link2, Palette,
   MoreHorizontal, Moon, Sun, Printer, Timer, Flame, Wifi, Mic, Volume2,
 } from "lucide-react";
 import ScriptEditor, { isCoarse } from "./ScriptEditor.jsx";
@@ -10,7 +10,7 @@ import { shareEnabled, shareRecord, shareURL, publish, shareStats, revokeShare, 
 import {
   migrateDoc, DEFAULT_DOC, deriveScenes, deleteSceneAt, moveScene as moveSceneBlocks,
   buildFDX, buildFountain, parseFDX, parseScriptText, allCharacters, uid, newBlock,
-  plainText, findMatches, REVISIONS, revisionLabel,
+  plainText, findMatches, REVISIONS, revisionLabel, CARD_COLORS, sceneEighths, formatEighths,
 } from "./engine.js";
 import { planSync, SWS_FILE_RE, LEGACY_JSON_RE, FOUNTAIN_FILE_RE, swsFileName, fountainFileName, swsEnvelope, hashStr } from "./sync.js";
 import { createDictation, createReadback, buildReadbackPlan } from "./dictation.js";
@@ -314,6 +314,10 @@ export default function Screenwriter() {
 
   const [boardOpen, setBoardOpen] = useState(() => (typeof window !== "undefined" ? window.innerWidth > 980 : true));
   const [boardFull, setBoardFull] = useState(false);
+  const [boardBig, setBoardBig] = useState(() => {
+    try { return storage.api.getItem("screenwriter-board-big") === "1"; } catch { return false; }
+  });
+  const [colorFor, setColorFor] = useState(null); // scene anchor id whose swatch tray is open
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [charsOpen, setCharsOpen] = useState(false);
   const [treatmentOpen, setTreatmentOpen] = useState(false);
@@ -349,6 +353,21 @@ export default function Screenwriter() {
   streakRef.current = streak;
 
   const scenes = useMemo(() => deriveScenes(doc.blocks), [doc.blocks]);
+
+  const setCardColor = (blockId, color) => {
+    updateHeading(blockId, { color: color || undefined });
+    setColorFor(null);
+  };
+  const setCardLabel = (color, text) =>
+    setDoc((d) => ({ ...d, cardLabels: { ...(d.cardLabels || {}), [color]: text } }));
+
+  /* Only the colours actually in use, so the legend is a key to THIS script
+     rather than a palette of eight things you haven't touched. */
+  const coloursInUse = useMemo(() => {
+    const seen = new Set();
+    scenes.forEach((s) => { if (s.anchor && s.anchor.color) seen.add(s.anchor.color); });
+    return CARD_COLORS.filter((c) => seen.has(c));
+  }, [scenes]);
 
   /* ---------------- share links ---------------- */
   /* The published copy is a snapshot, not a mirror: it changes when you say so,
@@ -486,7 +505,7 @@ export default function Screenwriter() {
   /* ---------------- editor <-> state ---------------- */
   const onEditorChange = useCallback((blocks, structural) => {
     setDoc((d) => {
-      /* preserve scene metadata (act/done/synopsis/revision) across edits by id */
+      /* preserve scene metadata (act/done/synopsis/revision/colour) by block id */
       const meta = new Map();
       const was = new Map();
       d.blocks.forEach((b) => {
@@ -495,6 +514,7 @@ export default function Screenwriter() {
         if (b.done !== undefined) m.done = b.done;
         if (b.synopsis !== undefined) m.synopsis = b.synopsis;
         if (b.revision !== undefined) m.revision = b.revision;
+        if (b.color !== undefined) m.color = b.color;
         if (Object.keys(m).length) meta.set(b.id, m);
         was.set(b.id, b.text);
       });
@@ -1779,12 +1799,22 @@ export default function Screenwriter() {
   /* ---------------- board drag ---------------- */
   const doMove = (from, to) => { if (from != null && to != null && from !== to) setBlocks(moveSceneBlocks(doc.blocks, from, to)); };
 
-  const sceneSnippet = (s) => {
-    /* the board shows words, not markers */
-    const b = s.blocks.find((x) => plainText(x.text).trim());
-    if (!b) return "";
-    const t = plainText(b.text).trim();
-    return t.length > 70 ? t.slice(0, 70) + "\u2026" : t;
+  /* everything in the scene, heading included -- what it weighs and who is in
+     it both depend on the slugline as much as the rest */
+  const sceneBlocks = (s) => (s.heading ? [s.heading, ...s.blocks] : s.blocks);
+
+  const sceneSnippet = (s, max = 70) => {
+    /* the board shows words, not markers. Past a single line it reads better
+       as running prose than as one truncated block, so join them. */
+    const parts = [];
+    for (const b of s.blocks) {
+      const t = plainText(b.text).trim();
+      if (!t) continue;
+      parts.push(b.type === "character" ? t + ":" : t);
+      if (parts.join(" ").length >= max) break;
+    }
+    const text = parts.join(" ");
+    return text.length > max ? text.slice(0, max).trimEnd() + "\u2026" : text;
   };
 
   const doneCount = scenes.filter((s) => s.anchor && s.anchor.done).length;
@@ -2146,13 +2176,34 @@ export default function Screenwriter() {
                 <>
                   <span>Scenes <span className="scene-progress">{doneCount}/{scenes.length}</span></span>
                   <span className="head-actions">
+                    <button className={`ghost${boardBig ? " on" : ""}`} title={boardBig ? "Compact cards" : "Expanded cards"}
+                      onClick={() => setBoardBig((v) => {
+                        try { storage.api.setItem("screenwriter-board-big", v ? "0" : "1"); } catch {}
+                        return !v;
+                      })}><List size={13} /></button>
                     <button className="ghost" title={boardFull ? "Back to sidebar" : "Full-screen board"} onClick={() => setBoardFull((v) => !v)}><Maximize2 size={13} /></button>
                     <button className="mini-btn" onClick={() => addScene()}><Plus size={13} /> Scene</button>
                   </span>
                 </>
               )}
             </div>
-            <div className="cards" onDragLeave={() => setOverIdx(null)}>
+            {coloursInUse.length > 0 && (
+              <div className="legend">
+                {coloursInUse.map((c) => (
+                  <span className="legend-item" key={c}>
+                    <span className="legend-dot" data-card-color={c} />
+                    <input
+                      className="legend-label"
+                      value={(doc.cardLabels && doc.cardLabels[c]) || ""}
+                      placeholder="name it"
+                      onChange={(e) => setCardLabel(c, e.target.value)}
+                      spellCheck={false}
+                    />
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className={`cards${boardBig ? " big" : ""}`} onDragLeave={() => setOverIdx(null)}>
               {scenes.map((s, i) => {
                 const h = s.anchor;
                 /* Number the cards the way the page numbers them: only a
@@ -2170,7 +2221,8 @@ export default function Screenwriter() {
                       </div>
                     )}
                     <div
-                      className={`card${dragIdx === i ? " dragging" : ""}${overIdx === i ? " over" : ""}${h && selectedScenes.has(h.id) ? " selected" : ""}`}
+                      className={`card${dragIdx === i ? " dragging" : ""}${overIdx === i ? " over" : ""}${h && selectedScenes.has(h.id) ? " selected" : ""}${h && h.color ? " tinted" : ""}`}
+                      data-card-color={(h && h.color) || undefined}
                       draggable
                       onDragStart={(e) => { setDragIdx(i); e.dataTransfer.effectAllowed = "move"; }}
                       onDragEnd={() => { setDragIdx(null); setOverIdx(null); }}
@@ -2193,15 +2245,52 @@ export default function Screenwriter() {
                         </span>
                         <span className="card-actions" onClick={(e) => e.stopPropagation()}>
                           {h && (
+                            <button className="ghost" title="Colour"
+                              onClick={() => setColorFor((c) => (c === h.id ? null : h.id))}><Palette size={12} /></button>
+                          )}
+                          {h && (
                             <button className="ghost" title={h.act !== undefined ? "Remove act flag" : "Add act flag"}
                               onClick={() => updateHeading(h.id, { act: h.act !== undefined ? undefined : "ACT " })}><Flag size={12} /></button>
                           )}
                           <button className="ghost danger" title="Delete scene" onClick={() => removeScene(i)}><Trash2 size={12} /></button>
                         </span>
                       </div>
+
+                      {h && colorFor === h.id && (
+                        <div className="swatch-tray" onClick={(e) => e.stopPropagation()}>
+                          <button className="swatch none" title="No colour" onClick={() => setCardColor(h.id, null)}>—</button>
+                          {CARD_COLORS.map((c) => (
+                            <button key={c} className={`swatch${h.color === c ? " on" : ""}`} data-card-color={c}
+                              title={(doc.cardLabels && doc.cardLabels[c]) || c}
+                              onClick={() => setCardColor(h.id, c)} />
+                          ))}
+                        </div>
+                      )}
+
                       {h && (
-                        <input className="card-note" value={h.synopsis || ""} placeholder={sceneSnippet(s) || "Add a note..."}
-                          onClick={(e) => e.stopPropagation()} onChange={(e) => updateHeading(h.id, { synopsis: e.target.value })} spellCheck={false} />
+                        boardBig ? (
+                          <textarea className="card-note big" value={h.synopsis || ""} rows={2}
+                            placeholder="What happens here?"
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => updateHeading(h.id, { synopsis: e.target.value })} spellCheck={false} />
+                        ) : (
+                          <input className="card-note" value={h.synopsis || ""} placeholder={sceneSnippet(s) || "Add a note..."}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => updateHeading(h.id, { synopsis: e.target.value })} spellCheck={false} />
+                        )
+                      )}
+
+                      {boardBig && (
+                        <>
+                          <div className="card-preview">{sceneSnippet(s, 220) || "Nothing written yet."}</div>
+                          <div className="card-foot">
+                            <span className="card-len">{formatEighths(sceneEighths(sceneBlocks(s)))} pp</span>
+                            {(() => {
+                              const cast = allCharacters(sceneBlocks(s));
+                              return cast.length ? <span className="card-cast">{cast.join(" · ")}</span> : null;
+                            })()}
+                          </div>
+                        </>
                       )}
                     </div>
                   </div>
