@@ -205,9 +205,23 @@ export const CSS = `
 [data-card-color="plum"]   { --card: #96599B; }
 [data-card-color="slate"]  { --card: #6B7683; }
 
-/* the stripe carries the colour; the tint only hints at it, so a coloured card
-   is still a card you can read */
-.card.tinted { border-left: 3px solid var(--card); }
+/* A solid bar at the edge, then a wash of the same colour fading out across
+   the card. Loud enough to read down a column of cards at a glance; gone again
+   by the time it reaches the words.
+
+   Painted as one gradient rather than a border-left, so the bar is clipped by
+   the card's corner radius instead of squaring it off, and the 1px border
+   stays whole. The tints are mixed from the one hex per colour, so night mode
+   -- which redefines --panel2 and --line -- adapts without a second palette. */
+.card.tinted {
+  background: linear-gradient(
+    90deg,
+    var(--card) 0 6px,
+    color-mix(in srgb, var(--card) 22%, var(--panel2)) 6px,
+    var(--panel2) 74%
+  );
+  border-color: color-mix(in srgb, var(--card) 26%, var(--line));
+}
 .card.tinted .card-heading { color: var(--text); }
 
 .swatch-tray { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
