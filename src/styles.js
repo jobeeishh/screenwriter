@@ -205,24 +205,49 @@ export const CSS = `
 [data-card-color="plum"]   { --card: #96599B; }
 [data-card-color="slate"]  { --card: #6B7683; }
 
-/* A solid bar at the edge, then a wash of the same colour fading out across
-   the card. Loud enough to read down a column of cards at a glance; gone again
-   by the time it reaches the words.
-
-   Painted as one gradient rather than a border-left, so the bar is clipped by
-   the card's corner radius instead of squaring it off, and the 1px border
-   stays whole. The tints are mixed from the one hex per colour, so night mode
-   -- which redefines --panel2 and --line -- adapts without a second palette. */
+/* The whole card takes the colour, at a wash light enough to read on -- an
+   index card that happens to be teal, rather than a white card wearing a badge.
+   Border and text are mixed from the same single hex, so the card reads as one
+   object and the palette stays one value per colour. */
 .card.tinted {
-  background: linear-gradient(
-    90deg,
-    var(--card) 0 6px,
-    color-mix(in srgb, var(--card) 22%, var(--panel2)) 6px,
-    var(--panel2) 74%
-  );
-  border-color: color-mix(in srgb, var(--card) 26%, var(--line));
+  background: color-mix(in srgb, var(--card) 16%, var(--panel2));
+  border-color: color-mix(in srgb, var(--card) 42%, var(--line));
 }
-.card.tinted .card-heading { color: var(--text); }
+/* The percentage is how much CARD survives the mix, so lower is darker. 55%
+   rather than 70% because at 70% the amber heading measured 4.43:1 against its
+   own wash, a shade under AA for text this size. */
+.card.tinted .card-heading { color: color-mix(in srgb, var(--card) 55%, #000); }
+.card.tinted .card-num,
+.card.tinted .card-note,
+.card.tinted .card-preview,
+.card.tinted .card-foot { color: color-mix(in srgb, var(--card) 52%, #000); }
+.card.tinted .card-note::placeholder { color: color-mix(in srgb, var(--card) 34%, #000); }
+.card.tinted .card-preview { border-top-color: color-mix(in srgb, var(--card) 30%, var(--line)); }
+
+/* At night the wash is dark, so the hue has to lift the text off it rather
+   than sink into it -- the same mix towards black would be unreadable.
+
+   Only the heading takes the tint here. Mixing a mid-tone hue into text that
+   is already muted costs contrast on a dark ground: at 22% the body dropped to
+   3.7:1 where the plain card manages 4.74:1. The heading carries the colour
+   perfectly well on its own. */
+/* And the wash itself has to be darkened before it is blended in. These hues
+   are mid-tone, so washing them straight into a dark surface LIGHTENS it and
+   closes the gap with the muted body text -- 3.7:1 where the plain card
+   manages 4.74:1. Darkening the hue first keeps the colour and the luminance. */
+.sw-root.night .card.tinted {
+  background: color-mix(in srgb, color-mix(in srgb, var(--card) 38%, #000) 20%, var(--panel2));
+  border-color: color-mix(in srgb, var(--card) 34%, var(--line));
+}
+.sw-root.night .card.tinted .card-heading { color: color-mix(in srgb, var(--card) 28%, var(--text)); }
+.sw-root.night .card.tinted .card-num,
+.sw-root.night .card.tinted .card-note,
+.sw-root.night .card.tinted .card-preview,
+.sw-root.night .card.tinted .card-foot { color: var(--dim); }
+.sw-root.night .card.tinted .card-note::placeholder { color: var(--faint); }
+
+/* a finished scene still reads as finished, colour or not */
+.card.tinted:has(.scene-check.done) .card-heading { color: var(--faint); }
 
 .swatch-tray { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
 .swatch {
